@@ -6,6 +6,9 @@ Stages (each reads the previous stage's Parquet output, so they can be rerun alo
   sample   small fixed sample of dev (+ test France) for rule development -> work/sample/
   normalize  name/address representations for --subset -> work/norm/<subset>.parquet
   block    candidate pairs for --subset (needs normalize) -> work/block/<subset>.parquet
+  features pair + group features for --subset (needs block) -> work/features/<subset>.parquet
+  train    LightGBM on features/<--train-subset>, decision policy chosen on val -> work/models/
+  predict  score + decide for --subset -> work/pred/<subset>_matches.parquet
 """
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ from pathlib import Path
 from common import Paths, setup_logging
 
 REPO = Path(__file__).resolve().parents[1]
-STAGES = ["convert", "slices", "sample", "normalize", "block"]
+STAGES = ["convert", "slices", "sample", "normalize", "block", "features", "train", "predict"]
 
 
 def main() -> None:
@@ -27,7 +30,10 @@ def main() -> None:
                     help="where intermediate Parquet files go")
     ap.add_argument("--subset", default="sample",
                     choices=["sample", "dev", "tune", "val", "train", "test"],
-                    help="which records the normalize / block stages process")
+                    help="which records the normalize / block / features stages process")
+    ap.add_argument("--neg-frac", type=float, default=None,
+                    help="features: keep this fraction of non-matching pairs (training only)")
+    ap.add_argument("--train-subset", default="tune", help="train: features to fit on")
     args = ap.parse_args()
 
     setup_logging()
@@ -48,6 +54,15 @@ def main() -> None:
         elif stage == "block":
             import blocking
             blocking.run(paths, args.subset)
+        elif stage == "features":
+            import features
+            features.run(paths, args.subset, args.neg_frac)
+        elif stage == "train":
+            import model
+            model.train(paths, args.train_subset, args.neg_frac or 1.0)
+        elif stage == "predict":
+            import model
+            model.predict(paths, args.subset)
 
 
 if __name__ == "__main__":
