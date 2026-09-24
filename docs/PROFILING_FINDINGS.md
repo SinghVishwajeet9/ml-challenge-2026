@@ -140,3 +140,19 @@ Computed on normalized (lowercased, punctuation-stripped) text using token-Jacca
    true-match tail, the final matching threshold should be tuned conservatively but
    informed by both signals — requiring both name AND address to be weak before
    rejecting a candidate, rather than rejecting on either being weak alone.
+
+## 8. Addendum (repo setup, full-file checks)
+
+- **Test country mix differs from train**: test S1 is India 46.8%, US 38.3%,
+  France 15.0% (train S1: US 60%, India 40%). France has no postcodes in addresses and
+  is concentrated in a handful of cities (Bordeaux, Nantes, Lille, Roubaix...), so
+  France blocks will be dense.
+- **More scripts than Devanagari/Tamil**: Gurmukhi, Kannada, Telugu and Bengali also
+  appear in names, and Indian state names appear in native script inside addresses
+  (`बिहार`, `తెలంగాణ`, `পশ্চিমবঙ্গ`).
+- **Placeholder addresses**: literal `None` / `<NULL>` strings occur; `convert` maps
+  them to null.
+- **Name junk**: prefixes/suffixes like `***`, `--`, `#99067`, `| www.site.com`,
+  `(Limited)`, `[Limited]`.
+- **Test names contain literal `"`** — TSVs must be read with quoting disabled.
+- **Each S2/S3 record matches at most one S1**; **matched pairs always share country**.
