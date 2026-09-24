@@ -1,0 +1,42 @@
+{
+  "seed": 42,
+  "fractions": {
+    "val": 0.06,
+    "dev": 0.05,
+    "tune": 0.2
+  },
+  "tiers": {
+    "val": [
+      "India:tamil nadu",
+      "US:DC",
+      "US:KS",
+      "US:ND",
+      "US:OR",
+      "US:UT"
+    ],
+    "dev": [
+      "India:punjab",
+      "India:rajasthan",
+      "India:uttarakhand",
+      "US:IL"
+    ],
+    "tune": [
+      "India:gujarat",
+      "India:haryana",
+      "India:karnataka",
+      "India:telangana",
+      "US:CO",
+      "US:FL",
+      "US:KY",
+      "US:MA",
+      "US:ME",
+      "US:MT",
+      "US:OH",
+      "US:OK",
+      "US:PA",
+      "US:RI",
+      "US:VA",
+      "US:WY"
+    ]
+  }
+}

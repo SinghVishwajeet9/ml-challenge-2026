@@ -1,0 +1,14 @@
+# Python 3.13 (3.12 also works). All packages are MIT / BSD / Apache-2.0 / ISC licensed.
+polars==1.44.2
+pyarrow==25.0.1
+duckdb==1.5.5
+numpy==2.5.3
+scipy==1.18.1
+rapidfuzz==3.14.6
+jellyfish==1.2.1
+scikit-learn==1.9.1
+sparse-dot-topn==1.2.0
+indic-transliteration==2.3.82
+anyascii==0.3.3
+lightgbm==4.7.0
+joblib==1.6.0

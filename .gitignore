@@ -1,0 +1,21 @@
+# Environments
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Data and generated artifacts — never commit
+dataset/
+work/
+output/
+*.tsv
+*.parquet
+*.zip
+*.npy
+*.lgb
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
