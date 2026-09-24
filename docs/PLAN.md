@@ -108,8 +108,8 @@ are never used for development (also mimics unseen-country generalisation).
 ### Phase 0 — Setup (PC)
 | # | Who | Step |
 |---|---|---|
-| 1 | Claude | Scaffold repo (`src/`, `requirements.txt`, `.gitignore` excluding data), venv, `git init`, first commit |
-| 2 | You | Create a **private** GitHub repo and push |
+| 1 | Automated | Scaffold repo (`src/`, `requirements.txt`, `.gitignore` excluding data), venv, `git init`, first commit |
+| 2 | Manual | Create a **private** GitHub repo and push |
 
 ### Phase 1 — Foundation (PC)
 | # | Step | Check |
@@ -137,16 +137,16 @@ are never used for development (also mimics unseen-country generalisation).
 ### Phase 4 — First leaderboard submission (PC, early)
 | # | Who | Step |
 |---|---|---|
-| 14 | Claude | Run on test per country, write both TSVs, run `validate_submission.py` |
-| 15 | You | Upload `matching_results.tsv`; compare with local validation F0.5 |
+| 14 | Automated | Run on test per country, write both TSVs, run `validate_submission.py` |
+| 15 | Manual | Upload `matching_results.tsv`; compare with local validation F0.5 |
 | 16 | Both | Iterate on PC; submit periodically |
 
 ### Phase 5 — Full-scale run (AWS, once validation plateaus)
 | # | Who | Step |
 |---|---|---|
-| 17 | You | Billing alert, S3 bucket, upload Parquet, launch r6i/r7i.4xlarge (spot) |
-| 18 | Claude | Exact commands (clone, install, run all stages) |
-| 19 | You | Run, download outputs, **stop the instance** (budget ~2–4 h) |
+| 17 | Manual | Billing alert, S3 bucket, upload Parquet, launch r6i/r7i.4xlarge (spot) |
+| 18 | Automated | Exact commands (clone, install, run all stages) |
+| 19 | Manual | Run, download outputs, **stop the instance** (budget ~2–4 h) |
 
 ### Phase 6 — Packaging (PC)
 | # | Step |

@@ -161,15 +161,29 @@ def train(paths: Paths, train_subset: str, neg_frac: float) -> None:
 
 
 def predict(paths: Paths, subset: str) -> None:
+    """Score every candidate of `subset` and apply the decision policy.
+    Streams one country at a time in feature chunks, so test (~69M candidate pairs)
+    never holds all features in memory: only (s1_rid, other_rid, p) is kept."""
+    import features as F
+
     models = paths.work / "models"
     policy = json.loads((models / "policy.json").read_text())
     booster = lgb.Booster(model_file=str(models / "lgb.txt"))
-    feats = pl.read_parquet(paths.work / "features" / f"{subset}.parquet")
-    scored = feats.select("s1_rid", "other_rid").with_columns(
-        pl.Series("p", booster.predict(_matrix(feats, policy["features"])).astype(np.float32)))
+    norm = pl.read_parquet(paths.norm / f"{subset}.parquet")
+    side = norm.select(F.NORM_COLS).join(F._oov(norm), on="rid", how="left")
+    scored = []
+    for part in sorted((paths.work / "block" / subset).glob("*.parquet")):
+        with timed(f"score {subset}/{part.stem}"):
+            cands = F.group_features(pl.read_parquet(part))
+            for i in range(0, cands.height, F.CHUNK):
+                feats = F.pair_features(cands.slice(i, F.CHUNK), side)
+                scored.append(feats.select("s1_rid", "other_rid").with_columns(pl.Series(
+                    "p", booster.predict(_matrix(feats, policy["features"])).astype(np.float32))))
+    scored = pl.concat(scored)
     out = paths.work / "pred"
     out.mkdir(exist_ok=True)
     scored.write_parquet(out / f"{subset}_scored.parquet")
     matches = decide(scored, policy)
     matches.write_parquet(out / f"{subset}_matches.parquet")
-    log.info("%s: %d candidate pairs scored, %d matches", subset, scored.height, matches.height)
+    log.info("%s: %d candidate pairs scored, %d matches (policy %s)", subset, scored.height,
+             matches.height, {k: v for k, v in policy.items() if k != "features"})

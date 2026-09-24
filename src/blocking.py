@@ -262,18 +262,20 @@ def _run_group(s1: pl.DataFrame, retrievers: list[Retriever], space: CountrySpac
         out.append(_rerank(chunk, pool, space, va_name, va_addr))
 
 
-def fit_state_neighbours(paths: Paths) -> pl.DataFrame:
+def fit_state_neighbours(paths: Paths, all_train: bool = False) -> pl.DataFrame:
     """(country, state, neighbour): S1 records of `state` also search S2/S3 records of
     `neighbour` when >= MERGE_MIN_SHARE and >= MERGE_MIN_PAIRS of the state's true pairs
     sit there (Telangana -> Andhra Pradesh, DC -> WA). Not transitive, so one link never
-    pulls in a third state. Learned from train minus the val slice; cached."""
-    f = paths.norm / "state_neighbours.parquet"
+    pulls in a third state. Learned from train minus the val slice, or all of train for
+    test (`all_train`); cached."""
+    f = paths.norm / ("state_neighbours_all.parquet" if all_train else "state_neighbours.parquet")
     if f.exists():
         return pl.read_parquet(f)
     norm = pl.read_parquet(paths.norm / "train.parquet",
                            columns=["rid", "entity_id", "country", "addr_state"])
-    val = pl.read_parquet(paths.slices / "val_records.parquet", columns=["rid"])
-    norm = norm.join(val, on="rid", how="anti")
+    if not all_train:
+        val = pl.read_parquet(paths.slices / "val_records.parquet", columns=["rid"])
+        norm = norm.join(val, on="rid", how="anti")
     gt = (pl.read_parquet(paths.gt_pairs())
           .join(norm.select(pl.col("entity_id").alias("s1_id"), "country",
                             pl.col("addr_state").alias("state")), on="s1_id")
@@ -375,13 +377,25 @@ def report(cands: pl.DataFrame, norm: pl.DataFrame, gt_pairs: pl.DataFrame) -> N
 GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_pairs"}
 
 
+def read_candidates(paths: Paths, subset: str) -> pl.DataFrame:
+    return pl.read_parquet(paths.work / "block" / subset / "*.parquet")
+
+
 def run(paths: Paths, subset: str) -> None:
     norm = pl.read_parquet(paths.norm / f"{subset}.parquet")
+    neighbours = fit_state_neighbours(paths, all_train=(subset == "test"))
+    out = paths.work / "block" / subset
+    out.mkdir(parents=True, exist_ok=True)
+    for f in out.glob("*.parquet"):
+        f.unlink()
+    # One country at a time, written straight to disk, to bound memory on test.
     with timed(f"block {subset}"):
-        cands = block(norm, fit_state_neighbours(paths))
-    out = paths.work / "block"
-    out.mkdir(exist_ok=True)
-    cands.write_parquet(out / f"{subset}.parquet")
+        for country in sorted(norm["country"].unique()):
+            block(norm.filter(pl.col("country") == country), neighbours).write_parquet(
+                out / f"{country}.parquet")
+    if subset not in GT_FOR_SUBSET and subset != "train":
+        return
+    cands = read_candidates(paths, subset)
     if subset in GT_FOR_SUBSET:
         report(cands, norm, pl.read_parquet(paths.slices / f"{GT_FOR_SUBSET[subset]}.parquet"))
     elif subset == "train":

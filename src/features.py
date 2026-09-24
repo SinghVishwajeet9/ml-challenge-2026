@@ -172,7 +172,7 @@ GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_
 
 def run(paths: Paths, subset: str, neg_frac: float | None) -> None:
     norm = pl.read_parquet(paths.norm / f"{subset}.parquet")
-    cands = pl.read_parquet(paths.work / "block" / f"{subset}.parquet")
+    cands = pl.read_parquet(paths.work / "block" / subset / "*.parquet")
     with timed("group features"):
         cands = group_features(cands)
 

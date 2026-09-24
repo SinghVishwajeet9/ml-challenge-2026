@@ -9,6 +9,7 @@ Stages (each reads the previous stage's Parquet output, so they can be rerun alo
   features pair + group features for --subset (needs block) -> work/features/<subset>.parquet
   train    LightGBM on features/<--train-subset>, decision policy chosen on val -> work/models/
   predict  score + decide for --subset -> work/pred/<subset>_matches.parquet
+  submit   test TSVs -> <--out-dir>/matching_results.tsv, candidate_pairs.tsv (+ validator)
 """
 from __future__ import annotations
 
@@ -18,7 +19,8 @@ from pathlib import Path
 from common import Paths, setup_logging
 
 REPO = Path(__file__).resolve().parents[1]
-STAGES = ["convert", "slices", "sample", "normalize", "block", "features", "train", "predict"]
+STAGES = ["convert", "slices", "sample", "normalize", "block", "features", "train", "predict",
+          "submit"]
 
 
 def main() -> None:
@@ -34,6 +36,9 @@ def main() -> None:
     ap.add_argument("--neg-frac", type=float, default=None,
                     help="features: keep this fraction of non-matching pairs (training only)")
     ap.add_argument("--train-subset", default="tune", help="train: features to fit on")
+    ap.add_argument("--out-dir", default=str(REPO / "output"), help="submit: output folder")
+    ap.add_argument("--validator", default=str(REPO.parent / "student_resource" / "utils"
+                                               / "validate_submission.py"))
     args = ap.parse_args()
 
     setup_logging()
@@ -63,6 +68,9 @@ def main() -> None:
         elif stage == "predict":
             import model
             model.predict(paths, args.subset)
+        elif stage == "submit":
+            import submit
+            submit.run(paths, Path(args.out_dir), Path(args.validator))
 
 
 if __name__ == "__main__":

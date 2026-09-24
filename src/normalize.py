@@ -347,14 +347,17 @@ SUBSETS = {
 CHUNK_ROWS = 250_000  # ~1.5 GB peak per chunk; keeps 16 GB machines safe
 
 
-def load_aliases(paths: Paths) -> pl.DataFrame:
-    f = paths.norm / "state_aliases.parquet"
+def load_aliases(paths: Paths, all_train: bool = False) -> pl.DataFrame:
+    """Learned state aliases. Fitted on train minus the val slice (keeps val honest), or
+    on all of train (`all_train`, used for test)."""
+    f = paths.norm / ("state_aliases_all.parquet" if all_train else "state_aliases.parquet")
     if f.exists():
         return pl.read_parquet(f)
-    with timed("fit learned state aliases (train minus val slice)"):
+    with timed(f"fit learned state aliases ({'all train' if all_train else 'train minus val'})"):
         records = pl.read_parquet(paths.records("train"))
-        val_ids = pl.read_parquet(paths.slices / "val_records.parquet", columns=["rid"])
-        records = records.join(val_ids, on="rid", how="anti")
+        if not all_train:
+            val_ids = pl.read_parquet(paths.slices / "val_records.parquet", columns=["rid"])
+            records = records.join(val_ids, on="rid", how="anti")
         aliases = fit_state_aliases(records, pl.read_parquet(paths.gt_pairs()))
         aliases.write_parquet(f)
     log.info("learned %d state aliases", aliases.height)
@@ -368,7 +371,7 @@ def normalize(df: pl.DataFrame, aliases: pl.DataFrame) -> pl.DataFrame:
 
 
 def run(paths: Paths, subset: str) -> None:
-    aliases = load_aliases(paths)
+    aliases = load_aliases(paths, all_train=(subset == "test"))
     df = pl.concat([pl.read_parquet(f) for f in SUBSETS[subset](paths)], how="diagonal")
     out_file = paths.norm / f"{subset}.parquet"
     with timed(f"normalize {subset} ({df.height} rows)"):
