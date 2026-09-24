@@ -42,7 +42,8 @@ class Paths:
         self.raw = self.work / "raw"
         self.slices = self.work / "slices"
         self.sample = self.work / "sample"
-        for d in (self.raw, self.slices, self.sample):
+        self.norm = self.work / "norm"
+        for d in (self.raw, self.slices, self.sample, self.norm):
             d.mkdir(parents=True, exist_ok=True)
 
     def tsv(self, split: str, source: int) -> Path:
