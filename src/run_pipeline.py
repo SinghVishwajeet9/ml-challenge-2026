@@ -5,6 +5,7 @@ Stages (each reads the previous stage's Parquet output, so they can be rerun alo
   slices   region-based dev / tune / val slices of train -> work/slices/
   sample   small fixed sample of dev (+ test France) for rule development -> work/sample/
   normalize  name/address representations for --subset -> work/norm/<subset>.parquet
+  block    candidate pairs for --subset (needs normalize) -> work/block/<subset>.parquet
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from pathlib import Path
 from common import Paths, setup_logging
 
 REPO = Path(__file__).resolve().parents[1]
-STAGES = ["convert", "slices", "sample", "normalize"]
+STAGES = ["convert", "slices", "sample", "normalize", "block"]
 
 
 def main() -> None:
@@ -26,7 +27,7 @@ def main() -> None:
                     help="where intermediate Parquet files go")
     ap.add_argument("--subset", default="sample",
                     choices=["sample", "dev", "tune", "val", "train", "test"],
-                    help="which records the normalize stage processes")
+                    help="which records the normalize / block stages process")
     args = ap.parse_args()
 
     setup_logging()
@@ -44,6 +45,9 @@ def main() -> None:
         elif stage == "normalize":
             import normalize
             normalize.run(paths, args.subset)
+        elif stage == "block":
+            import blocking
+            blocking.run(paths, args.subset)
 
 
 if __name__ == "__main__":

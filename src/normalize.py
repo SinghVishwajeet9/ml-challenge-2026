@@ -49,8 +49,6 @@ LEGAL = {
     "sa": "sa", "sas": "sas", "sasu": "sasu", "sarl": "sarl", "eurl": "eurl", "ei": "ei",
     "eirl": "eirl", "sci": "sci", "snc": "snc", "selarl": "selarl", "scop": "scop",
 }
-# Consonant skeletons of legal words, for transliterated spellings ("praivet", "limtid").
-LEGAL_SKEL = {"prvt": "private", "lmtd": "limited", "kmpn": "company"}
 NAME_STOP = {"the", "of", "and", "a", "an", "le", "la", "les", "de", "du", "des", "et", "l", "d"}
 
 ADDR_ABBR = {
@@ -90,8 +88,16 @@ LANDMARK_RE = r"^(?:near|nr|opp|opposite|behind|beside|next to|adjacent to|adj)\
 
 # --------------------------------------------------------------------------- helpers
 
+# Tamil: aytham + pa/ja write the borrowed sounds f/z; ca is pronounced s.
+_TAMIL_FIXES = (("ஃப", "f"), ("ஃஜ", "z"), ("ச", "s"))
+
+
 def _to_ascii(text: str) -> str:
-    return anyascii(_ANUSVARA.sub("n", text))
+    text = _ANUSVARA.sub("n", text)
+    if any("஀" <= ch <= "௿" for ch in text):
+        for src, dst in _TAMIL_FIXES:
+            text = text.replace(src, dst)
+    return anyascii(text)
 
 
 def fold_ascii(df: pl.DataFrame, col: str) -> pl.Expr:
@@ -112,11 +118,26 @@ def skeleton(e: pl.Expr) -> pl.Expr:
          .str.replace_all(r"ti(on|al|a)", "sh${1}")
          .str.replace_all(r"c([eiy])", "s${1}")
          .str.replace_all("[cq]", "k").str.replace_all("w", "v", literal=True)
-         .str.replace_all("z", "j", literal=True))
-    e = e.str.slice(0, 1) + e.str.slice(1).str.replace_all("[aeiouyh]", "")
+         .str.replace_all("z", "j", literal=True)
+         # Voicing is not written in Tamil (k/g, t/d, p/b share letters): merge it.
+         .str.replace_all("b", "p", literal=True).str.replace_all("d", "t", literal=True)
+         .str.replace_all("g", "k", literal=True))
+    # Leading vowels vary across transliterations ("east" / "ist"): keep that a vowel was
+    # there, not which one.
+    first = e.str.slice(0, 1)
+    first = pl.when(first.str.contains("^[aeiou]$")).then(pl.lit("a")).otherwise(first)
+    e = first + e.str.slice(1).str.replace_all("[aeiouyh]", "")
     for ch in "bcdfgjklmnprstv":
         e = e.str.replace_all(ch + ch, ch, literal=True)
     return e
+
+
+# Consonant skeletons of legal words, for transliterated spellings ("praivet", "limitet").
+# Computed with the same function so they always agree with name skeletons.
+LEGAL_SKEL = dict(zip(
+    pl.select(skeleton(pl.lit(pl.Series(["private", "limited", "company"])))).to_series()
+    .to_list(),
+    ["private", "limited", "company"]))
 
 
 def _num(e: pl.Expr) -> pl.Expr:
