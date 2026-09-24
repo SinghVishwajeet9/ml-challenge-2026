@@ -3,6 +3,7 @@
 Stages (each reads the previous stage's Parquet output, so they can be rerun alone):
   convert  raw TSVs -> work/raw/*.parquet
   slices   region-based dev / tune / val slices of train -> work/slices/
+  sample   small fixed sample of dev (+ test France) for rule development -> work/sample/
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from pathlib import Path
 from common import Paths, setup_logging
 
 REPO = Path(__file__).resolve().parents[1]
-STAGES = ["convert", "slices"]
+STAGES = ["convert", "slices", "sample"]
 
 
 def main() -> None:
@@ -33,6 +34,9 @@ def main() -> None:
         elif stage == "slices":
             import slices
             slices.run(paths, REPO / "configs" / "slices.json")
+        elif stage == "sample":
+            import sample
+            sample.run(paths)
 
 
 if __name__ == "__main__":
