@@ -19,3 +19,7 @@ output/
 Thumbs.db
 .vscode/
 .idea/
+
+# Submitted files are kept on purpose
+!submissions/
+!submissions/**
