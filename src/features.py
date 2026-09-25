@@ -101,6 +101,16 @@ def _oov(norm: pl.DataFrame) -> pl.DataFrame:
         (1 - pl.col("k").fill_null(False).cast(pl.Float32).mean()).alias("o_name_oov"))
 
 
+def _unit_ids(col: str) -> pl.Expr:
+    """Identifiers inside unit / floor text: 'Flat No F3' -> [f3], 'No.3Rd Floor' -> [3],
+    'Unit No 3B2' -> [3b2]. Tokens with a digit, or single letters ('Unit D')."""
+    return (pl.col(col).fill_null("").str.to_lowercase()
+            .str.replace_all(r"(\d+)(?:st|nd|rd|th)\b", "${1}")
+            .str.extract_all(r"\b[a-z]*\d+[a-z0-9]*\b|\b[a-z]\b")
+            .list.eval(pl.when(pl.element().str.strip_chars_start("0") == "").then(pl.lit("0"))
+                       .otherwise(pl.element().str.strip_chars_start("0"))).list.unique())
+
+
 def _uniqueness(norm: pl.DataFrame) -> pl.DataFrame:
     """How many S1 and S2/S3 records of the same country share a record's core name."""
     cnt = norm.group_by("country", "source", "name_core").len("c")
@@ -189,6 +199,7 @@ def pair_features(c: pl.DataFrame, ctx: PairContext) -> pl.DataFrame:
         _split("addr_core_1").alias("_ac1"), _split("addr_core_2").alias("_ac2"),
         pl.col("addr_state_1").is_not_null().alias("_st1"),
         pl.col("addr_state_2").is_not_null().alias("_st2"),
+        _unit_ids("addr_unit_1").alias("_u1"), _unit_ids("addr_unit_2").alias("_u2"),
     )
     d = d.with_columns(
         _jacc(pl.col("_nc1"), pl.col("_nc2")).alias("name_core_jacc"),
@@ -217,6 +228,8 @@ def pair_features(c: pl.DataFrame, ctx: PairContext) -> pl.DataFrame:
         *_overlap_flags("addr_house_1", "addr_house_2", "house"),
         *_overlap_flags("addr_numbers_1", "addr_numbers_2", "nums"),
         (pl.col("addr_unit_2").fill_null("") != "").alias("o_has_unit"),
+        (pl.col("addr_unit_1").fill_null("") != "").alias("s1_has_unit"),
+        *_overlap_flags("_u1", "_u2", "unit"),
         pl.col("name_translit_2").alias("o_translit"),
         pl.col("addr_missing_2").alias("o_addr_missing"),
         pl.col("source_2").cast(pl.Int8).alias("o_source"),
@@ -235,6 +248,7 @@ def pair_features(c: pl.DataFrame, ctx: PairContext) -> pl.DataFrame:
         _fuzzy(d, "name_concat_1", "name_concat_2", fuzz.partial_ratio, "concat_partial"),
         _fuzzy(d, "addr_norm_1", "addr_norm_2", fuzz.token_set_ratio, "addr_tset"),
         _fuzzy(d, "addr_norm_1", "addr_norm_2", fuzz.ratio, "addr_ratio"),
+        _fuzzy(d, "addr_unit_1", "addr_unit_2", fuzz.token_set_ratio, "unit_tset"),
     )
     d = d.rename({"o_name_oov_2": "o_name_oov"})
     keep = [x for x in d.columns if not x.startswith("_") and not x.endswith(("_1", "_2"))]
@@ -249,6 +263,10 @@ COMPETE = ["name_tset", "name_idf_jacc", "addr_tset", "addr_idf_jacc", "name_ske
 def competition_features(light: pl.DataFrame) -> pl.DataFrame:
     """For each similarity, how this S1 compares with the other S1s competing for the same
     S2/S3 record (and with the S1's other candidates). Needs the full candidate set."""
+    # Group maxima first: a window expression nested inside another is extremely slow.
+    light = light.with_columns(
+        *[pl.col(c).max().over("s1_rid").alias(f"_s1max_{c}") for c in COMPETE],
+        pl.col("name_tset").max().over("other_rid").alias("_omax_name_tset"))
     exprs = []
     for col in COMPETE:
         x = pl.col(col)
@@ -258,7 +276,7 @@ def competition_features(light: pl.DataFrame) -> pl.DataFrame:
             (x - second.over("other_rid")).cast(pl.Float32).alias(f"o_margin2_{col}"),
             x.rank("max", descending=True).over("other_rid").cast(pl.Int16)
             .alias(f"o_rank_{col}"),
-            (x >= x.max().over("s1_rid") - 0.02).sum().over("s1_rid").cast(pl.Int16)
+            (x >= pl.col(f"_s1max_{col}") - 0.02).sum().over("s1_rid").cast(pl.Int16)
             .alias(f"s1_near_top_{col}"),
             x.rank("max", descending=True).over("s1_rid").cast(pl.Int16)
             .alias(f"s1_rank_{col}"),
@@ -270,6 +288,11 @@ def competition_features(light: pl.DataFrame) -> pl.DataFrame:
         .alias("o_n_s1_addr_exact"),
         (pl.col("name_idf_jacc") >= 0.99).sum().over("s1_rid").cast(pl.Int16)
         .alias("s1_n_o_name_exact"),
+        pl.col("unit_eq").fill_null(False).sum().over("other_rid").cast(pl.Int16)
+        .alias("o_n_s1_unit_eq"),
+        (pl.col("unit_eq").fill_null(False)
+         & (pl.col("name_tset") >= pl.col("_omax_name_tset") - 0.05))
+        .sum().over("other_rid").cast(pl.Int16).alias("o_n_s1_unit_eq_top_name"),
     ]
     return light.select(exprs)
 
@@ -294,7 +317,7 @@ def build_features(cands: pl.DataFrame, norm: pl.DataFrame, tmp_dir):
         path = tmp_dir / f"part_{i // CHUNK:05d}.parquet"
         f.write_parquet(path)
         files.append((path, f.height))
-        light.append(f.select("s1_rid", "other_rid", *COMPETE))
+        light.append(f.select("s1_rid", "other_rid", "unit_eq", *COMPETE))
     comp = competition_features(pl.concat(light))
     del light
     offset = 0
