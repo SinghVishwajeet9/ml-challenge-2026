@@ -1,0 +1,3 @@
+# Submission files must stay byte-exact (no line-ending conversion)
+*.tsv -text
+submissions/** -text
