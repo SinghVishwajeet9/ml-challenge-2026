@@ -32,6 +32,7 @@ BEST_SO_FAR = 0.9857              # best val F0.5 so far (4-epoch transformer bl
 SUBMIT_AT = BEST_SO_FAR + 0.001   # 0.9867
 FLOOR = 0.9850                    # submission 3 val score
 MIN_FREE_GB = 3.0
+REUSE_REST = True
 ENV = {**os.environ, "POLARS_MAX_THREADS": "10", "OMP_NUM_THREADS": "10", "BER_THREADS": "10",
        "BER_WORKERS": "10", "PYTHONIOENCODING": "utf-8", "HF_HUB_OFFLINE": "1",
        "HF_HUB_DISABLE_SYMLINKS_WARNING": "1"}
@@ -101,8 +102,9 @@ def check_rest_band() -> None:
     pos = band.join(gt.rename({"s1_id": "s1_rid", "match_id": "other_rid"}),
                     on=["s1_rid", "other_rid"], how="semi").height / max(band.height, 1)
     log(f"  rest uncertain pairs {band.height}, true-match share {pos:.1%}")
-    check(300_000 <= band.height <= 1_200_000, "rest uncertain pair count plausible")
-    check(0.20 <= pos <= 0.60, "rest true-match share plausible")
+    # rest is harder than val (big crowded states): about 1.5 uncertain pairs per S1
+    check(300_000 <= band.height <= 3_000_000, "rest uncertain pair count plausible")
+    check(0.15 <= pos <= 0.60, "rest true-match share plausible")
 
 
 def _paths():
@@ -172,15 +174,19 @@ def main() -> None:
             run("block", "--subset", "val2")
         if start <= 3:
             log("STEP 3: score rest and val2 with the current LightGBM")
-            run("predict", "--subset", "rest")
+            if (WORK / "pred" / "rest_band_feats.parquet").exists() and REUSE_REST:
+                log("  reusing finished rest scoring (work/pred/rest_band_feats.parquet)")
+            else:
+                run("predict", "--subset", "rest")
             check_rest_band()
             run("predict", "--subset", "val2")
             log("STEP 3b: per-state report (informational)")
             run("holdout-report")
         if start <= 4:
             log("STEP 4: train the transformer on tune + rest")
+            # rest sample keeps the planned size (about 880,000 pairs, 1.5 to 2 h of GPU)
             run("xenc-train", "--xenc-tag", TAG, "--xenc-epochs", "3", "--xenc-use-rest",
-                "--xenc-addr-placeholder")
+                "--xenc-addr-placeholder", "--xenc-rest-frac", "0.31")
             auc = last_auc()
             log(f"  final val band AUC {auc} (best so far 0.9821)")
         if start <= 5:

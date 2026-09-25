@@ -48,6 +48,7 @@ def main() -> None:
     ap.add_argument("--xenc-train-frac", type=float, default=1.0)
     ap.add_argument("--xenc-use-rest", action="store_true")
     ap.add_argument("--xenc-addr-placeholder", action="store_true")
+    ap.add_argument("--xenc-rest-frac", type=float, default=1.0)
     ap.add_argument("--validator", default=str(REPO.parent / "student_resource" / "utils"
                                                / "validate_submission.py"))
     args = ap.parse_args()
@@ -90,7 +91,7 @@ def main() -> None:
             xenc.train(paths, args.xenc_tag, xenc.XConfig(
                 model=args.xenc_model, epochs=args.xenc_epochs, lora=args.xenc_lora,
                 train_frac=args.xenc_train_frac, use_rest=args.xenc_use_rest,
-                addr_placeholder=args.xenc_addr_placeholder))
+                addr_placeholder=args.xenc_addr_placeholder, rest_frac=args.xenc_rest_frac))
         elif stage == "xenc-blend":
             import xenc
             xenc.blend(paths, args.xenc_tag)

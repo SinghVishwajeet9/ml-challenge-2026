@@ -46,6 +46,7 @@ class XConfig:
     lora_r: int = 16
     train_frac: float = 1.0      # sample of the training band (faster experiments)
     addr_placeholder: bool = False   # "address unavailable" instead of an empty address
+    rest_frac: float = 1.0       # random share of rest's uncertain pairs to train on
     use_rest: bool = False       # add uncertain pairs from the 'rest' subset (train minus
                                  # tune and val), scored out-of-sample by the current LightGBM
 
@@ -243,6 +244,8 @@ def train(paths: Paths, tag: str, cfg: XConfig) -> None:
     tr = tr.with_columns(pl.when(pl.col("label")).then(1.0).otherwise(1.0 / NEG_FRAC).alias("w"))
     if cfg.use_rest:
         rest = _rest_band(paths, cols, cfg.addr_placeholder)
+        if cfg.rest_frac < 1:
+            rest = rest.sample(fraction=cfg.rest_frac, seed=SEED)
         keep = ["s1_rid", "other_rid", "p", "label", "w", "text_a", "text_b", *cols]
         tr = pl.concat([tr.select(keep), rest.select(keep)], how="vertical_relaxed")
         log.info("[%s] + rest band pairs %d", tag, rest.height)
