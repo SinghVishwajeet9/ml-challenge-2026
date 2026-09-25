@@ -1,7 +1,7 @@
-# Data Profiling Findings — Business Entity Resolution Challenge
+# Data Profiling Findings - Business Entity Resolution Challenge
 
 Profiling was done on the **training set** (`dataset/train/`), using full-file scans for
-counts/distributions and sampled pairs (3,000–20,000) for similarity calibration. No test data,
+counts/distributions and sampled pairs (3,000-20,000) for similarity calibration. No test data,
 external lookups, or APIs were used.
 
 ## 1. Volume
@@ -16,7 +16,7 @@ external lookups, or APIs were used.
 | test_source2.tsv | 4,887,273 |
 | test_source3.tsv | 5,082,316 |
 
-This is a large-scale problem — pairwise cross-joining Source 1 against Source 2/3 is
+This is a large-scale problem - pairwise cross-joining Source 1 against Source 2/3 is
 infeasible (2.2M × 10M+). Blocking / candidate generation must scale via inverted
 indexes / hashing, not brute force.
 
@@ -26,13 +26,13 @@ indexes / hashing, not brute force.
 - `business_address`: 100% populated in Source 1, but **empty in ~3.3%** of both
   Source 2 (168,967 rows) and Source 3 (175,916 rows) records.
 - Country split (train): US ≈ 60%, India ≈ 40%. Test adds **France**, unseen in
-  training — country must be treated as an open string label, never hardcoded/one-hot
+  training - country must be treated as an open string label, never hardcoded/one-hot
   to {US, India}.
 
 ## 3. Ground truth shape
 
 - **Singleton rate: 5.6%** (123,247 / 2,206,821 Source‑1 entities have no match).
-- Match-count distribution peaks at 3–4 matches per entity, mean 3.46 (including
+- Match-count distribution peaks at 3-4 matches per entity, mean 3.46 (including
   singletons):
 
   | # matches | count |
@@ -51,9 +51,9 @@ indexes / hashing, not brute force.
   | 11 | 37 |
 
 - Among non-singleton entities: average ≈1.78 matches from Source 2, ≈1.89 from
-  Source 3 — matches are spread across both sources, not concentrated in one.
+  Source 3 - matches are spread across both sources, not concentrated in one.
 - **Implication:** singleton detection matters (5.6% of the macro-average), but the
-  bulk of the score comes from correctly resolving multi-match entities — recall and
+  bulk of the score comes from correctly resolving multi-match entities - recall and
   precision on the "normal" case dominate.
 
 ## 4. Name noise patterns
@@ -71,7 +71,7 @@ indexes / hashing, not brute force.
   - Character-level typos/corruption: `East Workshop` ↔ `EAST WORSKHP`, `Best
     Infotech Limited` ↔ `Best Ing0fche Limited`, `LLC` ↔ `1lc`
 
-### Outlier pattern — unrelated names, identical addresses
+### Outlier pattern - unrelated names, identical addresses
 
 A subset of true matches have **completely unrelated business names** but
 **near-identical addresses**, e.g.:
@@ -99,7 +99,7 @@ miss this class of true positive.
 - Non-Latin script fragments appearing standalone in otherwise-Latin addresses (e.g.
   `தமிழ்நாடு` for "Tamil Nadu")
 - India and US addresses have **structurally different layouts** (US: street, city,
-  state; India: locality/PIN/state, more variable ordering) — a single normalization
+  state; India: locality/PIN/state, more variable ordering) - a single normalization
   regex won't serve both well.
 
 ## 6. Similarity calibration (true match vs. random pair)
@@ -115,9 +115,9 @@ Computed on normalized (lowercased, punctuation-stripped) text using token-Jacca
 | addr_char_ratio | 0.84 | 0.46 | 0.24 | 0.35 |
 
 - The bulk of true matches separate cleanly from random pairs on both name and
-  address similarity (medians ~0.65–0.88 vs. ~0.24–0.25 for random pairs).
+  address similarity (medians ~0.65-0.88 vs. ~0.24-0.25 for random pairs).
 - **But the 10th percentile of true matches (name_jaccard = 0.0) overlaps the random
-  distribution** — this is the garbled-name / address-only-match tail described in §4.
+  distribution** - this is the garbled-name / address-only-match tail described in §4.
   A strict AND-threshold on name similarity alone would drop these true positives
   during blocking.
 
@@ -131,14 +131,14 @@ Computed on normalized (lowercased, punctuation-stripped) text using token-Jacca
    US-style and India-style addresses; treat `country` as an open label so France (test-only)
    degrades gracefully to a generic normalizer.
 3. **Transliteration handling** needed for the ~13% of Source 2/3 names in Devanagari/
-   Tamil script — either a rule-based transliteration step, or lean on address
+   Tamil script - either a rule-based transliteration step, or lean on address
    features when the name script doesn't match Source 1 (always Latin).
 4. Matching-model features should include both name and address similarity
    (Jaccard + edit-ratio, at minimum), and the candidate-survival rule during blocking
    should not require both signals to be strong simultaneously.
 5. Given F_0.5's precision weighting (2× precision vs. recall) and the low-similarity
    true-match tail, the final matching threshold should be tuned conservatively but
-   informed by both signals — requiring both name AND address to be weak before
+   informed by both signals - requiring both name AND address to be weak before
    rejecting a candidate, rather than rejecting on either being weak alone.
 
 ## 8. Addendum (repo setup, full-file checks)
@@ -154,5 +154,5 @@ Computed on normalized (lowercased, punctuation-stripped) text using token-Jacca
   them to null.
 - **Name junk**: prefixes/suffixes like `***`, `--`, `#99067`, `| www.site.com`,
   `(Limited)`, `[Limited]`.
-- **Test names contain literal `"`** — TSVs must be read with quoting disabled.
+- **Test names contain literal `"`** - TSVs must be read with quoting disabled.
 - **Each S2/S3 record matches at most one S1**; **matched pairs always share country**.

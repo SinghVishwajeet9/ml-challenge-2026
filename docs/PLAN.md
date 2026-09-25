@@ -1,4 +1,4 @@
-# Plan — Business Entity Resolution Challenge
+# Plan - Business Entity Resolution Challenge
 
 Informed by [PROFILING_FINDINGS.md](PROFILING_FINDINGS.md). Constraints from the problem
 statement: MIT/Apache-2.0 licensed model, ≤8B params, no external lookups/APIs, F_0.5
@@ -15,7 +15,7 @@ macro-averaged scoring (precision weighted 2× over recall), output must be
   the mean entity has ~3.5 matches. Predicting 1 of 4 true matches scores F0.5 = 0.625;
   predicting all 4 plus 1 false positive scores 0.83. Tune, don't guess.
 
-## 1. Data audit — done
+## 1. Data audit - done
 See PROFILING_FINDINGS.md: field completeness, country distribution, ground-truth match
 cardinality, name/address noise patterns, true-match-vs-random similarity calibration.
 
@@ -50,7 +50,7 @@ cardinality, name/address noise patterns, true-match-vs-random similarity calibr
 - **Group-level** (big win): rank of candidate within its S1, gap to S1's top score,
   number of candidates; for each S2/S3 record, is this S1 its best S1 and the margin
   to its second-best S1; similarity to already-confident candidates of the same S1.
-- Use RapidFuzz (C++), not `difflib` — difflib is too slow at this scale.
+- Use RapidFuzz (C++), not `difflib` - difflib is too slow at this scale.
 
 ## 5. Matching model
 - LightGBM (MIT) on pairs: positives from ground truth, negatives = blocked-but-unmatched
@@ -72,12 +72,12 @@ cardinality, name/address noise patterns, true-match-vs-random similarity calibr
 - Run `utils/validate_submission.py` before every leaderboard upload.
 
 ## 8. Packaging
-- `code/business_entity_resolution/src/` — full pipeline, runnable end-to-end.
-- `code/business_entity_resolution/README.md` — exact reproduction steps.
-- `code/business_entity_resolution/requirements.txt` — pinned deps.
+- `code/business_entity_resolution/src/` - full pipeline, runnable end-to-end.
+- `code/business_entity_resolution/README.md` - exact reproduction steps.
+- `code/business_entity_resolution/requirements.txt` - pinned deps.
 - Fill in `Documentation_template.md`.
 
-## 9. Infrastructure — PC first, Colab for GPU, AWS for the full run
+## 9. Infrastructure - PC first, Colab for GPU, AWS for the full run
 - **Local PC (primary)**: Ryzen 5 5600 (12 threads), 16 GB RAM, RTX 3060. Faster than
   free Colab (2 vCPU, ~12 GB) for this CPU-bound workload. All dev work happens here.
 - **Colab (secondary)**: GPU embeddings (optional), or working away from the PC.
@@ -97,7 +97,7 @@ the chosen regions, including distractors, plus the true matches of chosen S1s.
 | Tier | Size | Where | Purpose |
 |---|---|---|---|
 | Dev | ~5% (~110k S1, ~500k S2/S3) | PC | Fast iteration on normalization, blocking, features |
-| Tune | ~20–25% (~500k S1), disjoint regions | PC | Train LightGBM, tune decision policy; held-out part = validation |
+| Tune | ~20-25% (~500k S1), disjoint regions | PC | Train LightGBM, tune decision policy; held-out part = validation |
 | Full | all train + all test | AWS (test per-country on PC may fit) | Final training + submission |
 
 Region lists live in a config file so slices are reproducible. The validation regions
@@ -105,50 +105,50 @@ are never used for development (also mimics unseen-country generalisation).
 
 ## 10. Execution roadmap (who does what, where, in order)
 
-### Phase 0 — Setup (PC)
+### Phase 0 - Setup (PC)
 | # | Who | Step |
 |---|---|---|
 | 1 | Automated | Scaffold repo (`src/`, `requirements.txt`, `.gitignore` excluding data), venv, `git init`, first commit |
 | 2 | Manual | Create a **private** GitHub repo and push |
 
-### Phase 1 — Foundation (PC)
+### Phase 1 - Foundation (PC)
 | # | Step | Check |
 |---|---|---|
 | 3 | TSV → Parquet (all data, once) + local F0.5 scorer | Row counts match profiling |
 | 4 | Region extraction + Dev/Tune slices | Printed slice sizes |
 | 5 | Normalization (name/address, per-country, transliteration, generic fallback) | Spot-check examples |
 
-### Phase 2 — Blocking (PC; Colab only for optional embeddings)
+### Phase 2 - Blocking (PC; Colab only for optional embeddings)
 | # | Step | Target |
 |---|---|---|
 | 6 | Blocking v1: rare name tokens + address keys, per country | Measure recall + candidates/S1 on Dev |
 | 7 | Add char-TF-IDF top-K; tune K and caps; confirm on Tune | ≈98% recall at ≤50 candidates/S1 |
-| 8 | *(Optional, Colab T4 or local 3060)* e5 embeddings if recall plateaus | — |
+| 8 | *(Optional, Colab T4 or local 3060)* e5 embeddings if recall plateaus | - |
 
-### Phase 3 — Matching model (PC)
+### Phase 3 - Matching model (PC)
 | # | Step |
 |---|---|
 | 9 | Pairwise features |
 | 10 | Group-level features |
 | 11 | Train LightGBM on Tune, score validation regions |
 | 12 | Decision step: exclusivity + per-entity F0.5 set selection |
-| 13 | Error analysis → iterate 9–12 |
+| 13 | Error analysis → iterate 9-12 |
 
-### Phase 4 — First leaderboard submission (PC, early)
+### Phase 4 - First leaderboard submission (PC, early)
 | # | Who | Step |
 |---|---|---|
 | 14 | Automated | Run on test per country, write both TSVs, run `validate_submission.py` |
 | 15 | Manual | Upload `matching_results.tsv`; compare with local validation F0.5 |
 | 16 | Both | Iterate on PC; submit periodically |
 
-### Phase 5 — Full-scale run (AWS, once validation plateaus)
+### Phase 5 - Full-scale run (AWS, once validation plateaus)
 | # | Who | Step |
 |---|---|---|
 | 17 | Manual | Billing alert, S3 bucket, upload Parquet, launch r6i/r7i.4xlarge (spot) |
 | 18 | Automated | Exact commands (clone, install, run all stages) |
-| 19 | Manual | Run, download outputs, **stop the instance** (budget ~2–4 h) |
+| 19 | Manual | Run, download outputs, **stop the instance** (budget ~2-4 h) |
 
-### Phase 6 — Packaging (PC)
+### Phase 6 - Packaging (PC)
 | # | Step |
 |---|---|
 | 20 | Fill in `Documentation_template.md` |

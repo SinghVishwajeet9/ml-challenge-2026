@@ -4,7 +4,7 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Data and generated artifacts — never commit
+# Data and generated artifacts - never commit
 dataset/
 work/
 output/

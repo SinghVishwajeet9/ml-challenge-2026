@@ -1,4 +1,4 @@
-"""Local F0.5 scorer — macro-averaged per Source 1 entity, singletons included.
+"""Local F0.5 scorer - macro-averaged per Source 1 entity, singletons included.
 
 Per entity:
   - no true matches: 1.0 if prediction empty, else 0.0
