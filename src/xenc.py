@@ -45,6 +45,8 @@ class XConfig:
     lora: bool = False           # train low-rank adapters instead of all encoder weights
     lora_r: int = 16
     train_frac: float = 1.0      # sample of the training band (faster experiments)
+    use_rest: bool = False       # add uncertain pairs from the 'rest' subset (train minus
+                                 # tune and val), scored out-of-sample by the current LightGBM
 
 
 def _dir(paths: Paths, tag: str):
@@ -80,8 +82,9 @@ def oof_predictions(paths: Paths, subset: str = "tune", neg_frac: float = NEG_FR
 
 
 def _raw_records(paths: Paths, subset: str) -> pl.DataFrame:
-    if subset == "test":
-        return pl.read_parquet(paths.records("test"), columns=["rid", "name", "address"])
+    if subset in ("test", "rest"):
+        split = "test" if subset == "test" else "train"
+        return pl.read_parquet(paths.records(split), columns=["rid", "name", "address"])
     return pl.read_parquet(paths.slices / f"{subset}_records.parquet",
                            columns=["rid", "name", "address"])
 
@@ -107,6 +110,22 @@ def band_pairs(paths: Paths, subset: str, scored: pl.DataFrame, features_file) -
     feats = (pl.scan_parquet(features_file)
              .join(band.lazy(), on=["s1_rid", "other_rid"], how="inner").collect())
     return _with_text(paths, subset, feats)
+
+
+def _rest_band(paths: Paths, cols: list[str]) -> pl.DataFrame:
+    """Uncertain pairs of the 'rest' subset (saved by `predict --subset rest`), labelled
+    from the ground truth. All candidates were scored, so no re-weighting is needed."""
+    norm = pl.read_parquet(paths.norm / "rest.parquet", columns=["rid", "entity_id"])
+    gt = (pl.read_parquet(paths.gt_pairs())
+          .join(norm.select(pl.col("rid").alias("s1_rid"), pl.col("entity_id").alias("s1_id")),
+                on="s1_id")
+          .join(norm.select(pl.col("rid").alias("other_rid"),
+                            pl.col("entity_id").alias("match_id")), on="match_id")
+          .select("s1_rid", "other_rid", pl.lit(True).alias("label")))
+    band = (pl.read_parquet(paths.work / "pred" / "rest_band_feats.parquet")
+            .join(gt, on=["s1_rid", "other_rid"], how="left")
+            .with_columns(pl.col("label").fill_null(False), pl.lit(1.0).alias("w")))
+    return _with_text(paths, "rest", band)
 
 
 # --------------------------------------------------------------------------- model
@@ -214,6 +233,13 @@ def train(paths: Paths, tag: str, cfg: XConfig) -> None:
     tr = band_pairs(paths, "tune",
                     pl.read_parquet(paths.work / "models" / "tune_oof.parquet").drop("label"),
                     paths.work / "features" / "tune.parquet")
+    # Tune features keep only NEG_FRAC of non-matches, so those rows are up-weighted.
+    tr = tr.with_columns(pl.when(pl.col("label")).then(1.0).otherwise(1.0 / NEG_FRAC).alias("w"))
+    if cfg.use_rest:
+        rest = _rest_band(paths, cols)
+        keep = ["s1_rid", "other_rid", "p", "label", "w", "text_a", "text_b", *cols]
+        tr = pl.concat([tr.select(keep), rest.select(keep)], how="vertical_relaxed")
+        log.info("[%s] + rest band pairs %d", tag, rest.height)
     if cfg.train_frac < 1:
         tr = tr.sample(fraction=cfg.train_frac, seed=SEED)
     va = band_pairs(paths, "val", pl.read_parquet(paths.work / "models" / "val_scored.parquet"),
@@ -224,7 +250,7 @@ def train(paths: Paths, tag: str, cfg: XConfig) -> None:
     scaler = NumScaler().fit(M._matrix(tr, cols).astype(np.float64))
     xtr, xva = scaler.transform(M._matrix(tr, cols)), scaler.transform(M._matrix(va, cols))
     ytr = tr["label"].to_numpy().astype(np.float32)
-    wtr = np.where(ytr > 0.5, 1.0, 1.0 / NEG_FRAC).astype(np.float32)
+    wtr = tr["w"].to_numpy().astype(np.float32)
     wtr /= wtr.mean()
     a_tr, b_tr = tr["text_a"].to_list(), tr["text_b"].to_list()
     a_va, b_va = va["text_a"].to_list(), va["text_b"].to_list()

@@ -397,6 +397,16 @@ def fit_cooccurrence_aliases(records: pl.DataFrame, countries: list[str]) -> pl.
 
 
 def run(paths: Paths, subset: str) -> None:
+    if subset == "rest":
+        # Train minus the tune and val slices: regions the current LightGBM never saw.
+        train = pl.read_parquet(paths.norm / "train.parquet")
+        used = pl.concat([pl.read_parquet(paths.slices / f"{s}_records.parquet", columns=["rid"])
+                          for s in ("tune", "val")])
+        rest = train.join(used, on="rid", how="anti")
+        rest.write_parquet(paths.norm / "rest.parquet")
+        log.info("rest subset: %d records (%d S1)", rest.height,
+                 rest.filter(pl.col("source") == 1).height)
+        return
     aliases = load_aliases(paths, all_train=(subset == "test"))
     df = pl.concat([pl.read_parquet(f) for f in SUBSETS[subset](paths)], how="diagonal")
     # Countries without training aliases learn city -> state from their own addresses.

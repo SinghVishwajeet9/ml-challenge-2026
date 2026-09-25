@@ -33,7 +33,7 @@ def main() -> None:
     ap.add_argument("--work-dir", default=str(REPO / "work"),
                     help="where intermediate Parquet files go")
     ap.add_argument("--subset", default="sample",
-                    choices=["sample", "dev", "tune", "val", "train", "test"],
+                    choices=["sample", "dev", "tune", "val", "train", "test", "rest"],
                     help="which records the normalize / block / features stages process")
     ap.add_argument("--neg-frac", type=float, default=None,
                     help="features: keep this fraction of non-matching pairs (training only)")
@@ -44,6 +44,7 @@ def main() -> None:
     ap.add_argument("--xenc-epochs", type=int, default=2)
     ap.add_argument("--xenc-lora", action="store_true")
     ap.add_argument("--xenc-train-frac", type=float, default=1.0)
+    ap.add_argument("--xenc-use-rest", action="store_true")
     ap.add_argument("--validator", default=str(REPO.parent / "student_resource" / "utils"
                                                / "validate_submission.py"))
     args = ap.parse_args()
@@ -85,7 +86,7 @@ def main() -> None:
             import xenc
             xenc.train(paths, args.xenc_tag, xenc.XConfig(
                 model=args.xenc_model, epochs=args.xenc_epochs, lora=args.xenc_lora,
-                train_frac=args.xenc_train_frac))
+                train_frac=args.xenc_train_frac, use_rest=args.xenc_use_rest))
         elif stage == "xenc-blend":
             import xenc
             xenc.blend(paths, args.xenc_tag)
