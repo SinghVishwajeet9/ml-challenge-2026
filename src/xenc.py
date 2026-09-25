@@ -45,6 +45,7 @@ class XConfig:
     lora: bool = False           # train low-rank adapters instead of all encoder weights
     lora_r: int = 16
     train_frac: float = 1.0      # sample of the training band (faster experiments)
+    addr_placeholder: bool = False   # "address unavailable" instead of an empty address
     use_rest: bool = False       # add uncertain pairs from the 'rest' subset (train minus
                                  # tune and val), scored out-of-sample by the current LightGBM
 
@@ -85,34 +86,39 @@ def _raw_records(paths: Paths, subset: str) -> pl.DataFrame:
     if subset in ("test", "rest"):
         split = "test" if subset == "test" else "train"
         return pl.read_parquet(paths.records(split), columns=["rid", "name", "address"])
+    # val2 records live in the slices folder like dev / tune / val.
     return pl.read_parquet(paths.slices / f"{subset}_records.parquet",
                            columns=["rid", "name", "address"])
 
 
-def _text(name: pl.Expr, address: pl.Expr) -> pl.Expr:
+def _text(name: pl.Expr, address: pl.Expr, placeholder: bool = False) -> pl.Expr:
+    if placeholder:
+        address = (pl.when(address.is_null() | (address.str.strip_chars() == ""))
+                   .then(pl.lit("address unavailable")).otherwise(address))
     return name.fill_null("") + " | " + address.fill_null("")
 
 
-def _with_text(paths: Paths, subset: str, pairs: pl.DataFrame) -> pl.DataFrame:
+def _with_text(paths: Paths, subset: str, pairs: pl.DataFrame,
+               placeholder: bool = False) -> pl.DataFrame:
     raw = _raw_records(paths, subset)
-    return (pairs.join(raw.select(pl.col("rid").alias("s1_rid"),
-                                  _text(pl.col("name"), pl.col("address")).alias("text_a")),
+    txt = _text(pl.col("name"), pl.col("address"), placeholder)
+    return (pairs.join(raw.select(pl.col("rid").alias("s1_rid"), txt.alias("text_a")),
                        on="s1_rid")
-            .join(raw.select(pl.col("rid").alias("other_rid"),
-                             _text(pl.col("name"), pl.col("address")).alias("text_b")),
+            .join(raw.select(pl.col("rid").alias("other_rid"), txt.alias("text_b")),
                   on="other_rid"))
 
 
-def band_pairs(paths: Paths, subset: str, scored: pl.DataFrame, features_file) -> pl.DataFrame:
+def band_pairs(paths: Paths, subset: str, scored: pl.DataFrame, features_file,
+               placeholder: bool = False) -> pl.DataFrame:
     """Uncertain pairs with both texts and the numeric feature columns. The feature file
     is scanned lazily and filtered to the band, so memory stays small."""
     band = scored.filter((pl.col("p") >= BAND[0]) & (pl.col("p") <= BAND[1]))
     feats = (pl.scan_parquet(features_file)
              .join(band.lazy(), on=["s1_rid", "other_rid"], how="inner").collect())
-    return _with_text(paths, subset, feats)
+    return _with_text(paths, subset, feats, placeholder)
 
 
-def _rest_band(paths: Paths, cols: list[str]) -> pl.DataFrame:
+def _rest_band(paths: Paths, cols: list[str], placeholder: bool = False) -> pl.DataFrame:
     """Uncertain pairs of the 'rest' subset (saved by `predict --subset rest`), labelled
     from the ground truth. All candidates were scored, so no re-weighting is needed."""
     norm = pl.read_parquet(paths.norm / "rest.parquet", columns=["rid", "entity_id"])
@@ -125,7 +131,7 @@ def _rest_band(paths: Paths, cols: list[str]) -> pl.DataFrame:
     band = (pl.read_parquet(paths.work / "pred" / "rest_band_feats.parquet")
             .join(gt, on=["s1_rid", "other_rid"], how="left")
             .with_columns(pl.col("label").fill_null(False), pl.lit(1.0).alias("w")))
-    return _with_text(paths, "rest", band)
+    return _with_text(paths, "rest", band, placeholder)
 
 
 # --------------------------------------------------------------------------- model
@@ -232,18 +238,18 @@ def train(paths: Paths, tag: str, cfg: XConfig) -> None:
 
     tr = band_pairs(paths, "tune",
                     pl.read_parquet(paths.work / "models" / "tune_oof.parquet").drop("label"),
-                    paths.work / "features" / "tune.parquet")
+                    paths.work / "features" / "tune.parquet", cfg.addr_placeholder)
     # Tune features keep only NEG_FRAC of non-matches, so those rows are up-weighted.
     tr = tr.with_columns(pl.when(pl.col("label")).then(1.0).otherwise(1.0 / NEG_FRAC).alias("w"))
     if cfg.use_rest:
-        rest = _rest_band(paths, cols)
+        rest = _rest_band(paths, cols, cfg.addr_placeholder)
         keep = ["s1_rid", "other_rid", "p", "label", "w", "text_a", "text_b", *cols]
         tr = pl.concat([tr.select(keep), rest.select(keep)], how="vertical_relaxed")
         log.info("[%s] + rest band pairs %d", tag, rest.height)
     if cfg.train_frac < 1:
         tr = tr.sample(fraction=cfg.train_frac, seed=SEED)
     va = band_pairs(paths, "val", pl.read_parquet(paths.work / "models" / "val_scored.parquet"),
-                    paths.work / "features" / "val.parquet")
+                    paths.work / "features" / "val.parquet", cfg.addr_placeholder)
     log.info("[%s] %s | train band pairs %d (pos %.1f%%) | val band pairs %d", tag, cfg,
              tr.height, 100 * tr["label"].mean(), va.height)
 
@@ -330,7 +336,7 @@ def score(paths: Paths, subset: str, tag: str) -> None:
     """Transformer probabilities for the uncertain pairs saved by `predict`."""
     net, tok, cfg, meta = _load(paths, tag)
     band = pl.read_parquet(paths.work / "pred" / f"{subset}_band_feats.parquet")
-    band = _with_text(paths, subset, band)
+    band = _with_text(paths, subset, band, cfg.addr_placeholder)
     x = NumScaler.from_json(meta["scaler"]).transform(
         band.select(pl.col(c).cast(pl.Float32) for c in meta["features"]).to_numpy())
     with timed(f"[{tag}] score {band.height} uncertain {subset} pairs"):

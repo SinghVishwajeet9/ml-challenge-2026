@@ -370,6 +370,47 @@ def normalize(df: pl.DataFrame, aliases: pl.DataFrame) -> pl.DataFrame:
     return df.drop("name", "address")
 
 
+VAL2_STATES = ["west bengal", "kerala", "bihar"]
+
+
+def build_holdouts(paths: Paths) -> None:
+    """Split the training records outside the tune and val slices into
+    val2 (a second held-out set: VAL2_STATES) and rest (extra transformer training data).
+    Region of a record: S1 by its state; a matched S2/S3 record by its S1 owner; an
+    unmatched S2/S3 record by its own state. So every true match of a val2 S1 is in val2."""
+    train = pl.read_parquet(paths.norm / "train.parquet")
+    used = pl.concat([pl.read_parquet(paths.slices / f"{s}_records.parquet", columns=["rid"])
+                      for s in ("tune", "val")])
+    pool = train.join(used, on="rid", how="anti")
+    gt = pl.read_parquet(paths.gt_pairs())
+    s1_state = pool.filter(pl.col("source") == 1).select(
+        pl.col("entity_id").alias("s1_id"), pl.col("addr_state").alias("owner_state"))
+    owner = gt.join(s1_state, on="s1_id").select(pl.col("match_id").alias("entity_id"),
+                                                 "owner_state")
+    owned_anywhere = gt.select(pl.col("match_id").alias("entity_id"))
+    pool = pool.join(owner, on="entity_id", how="left")
+    is_owned = pool["entity_id"].is_in(owned_anywhere["entity_id"].implode())
+    region = (pl.when(pl.col("source") == 1).then(pl.col("addr_state"))
+              .when(pl.col("owner_state").is_not_null()).then(pl.col("owner_state"))
+              .when(~pl.Series(is_owned)).then(pl.col("addr_state"))
+              .otherwise(pl.lit(None)))
+    pool = pool.with_columns(region.alias("_region"))
+    in_val2 = pl.col("_region").is_in(VAL2_STATES).fill_null(False)
+    val2 = pool.filter(in_val2).drop("owner_state", "_region")
+    rest = pool.filter(~in_val2).drop("owner_state", "_region")
+    val2.write_parquet(paths.norm / "val2.parquet")
+    rest.write_parquet(paths.norm / "rest.parquet")
+    # val2 also gets raw records and ground truth in the slices folder, like val.
+    raw = pl.read_parquet(paths.records("train"))
+    raw.join(val2.select("rid"), on="rid").write_parquet(paths.slices / "val2_records.parquet")
+    s1_ids = val2.filter(pl.col("source") == 1)["entity_id"]
+    gt.filter(pl.col("s1_id").is_in(s1_ids.implode())).write_parquet(
+        paths.slices / "val2_gt_pairs.parquet")
+    for name, df in (("val2", val2), ("rest", rest)):
+        log.info("%s subset: %d records (%d S1)", name, df.height,
+                 df.filter(pl.col("source") == 1).height)
+
+
 def fit_cooccurrence_aliases(records: pl.DataFrame, countries: list[str]) -> pl.DataFrame:
     """Label-free component -> state learned from the records themselves: in addresses
     that name a state explicitly, the other components (cities, districts) are counted
@@ -397,15 +438,8 @@ def fit_cooccurrence_aliases(records: pl.DataFrame, countries: list[str]) -> pl.
 
 
 def run(paths: Paths, subset: str) -> None:
-    if subset == "rest":
-        # Train minus the tune and val slices: regions the current LightGBM never saw.
-        train = pl.read_parquet(paths.norm / "train.parquet")
-        used = pl.concat([pl.read_parquet(paths.slices / f"{s}_records.parquet", columns=["rid"])
-                          for s in ("tune", "val")])
-        rest = train.join(used, on="rid", how="anti")
-        rest.write_parquet(paths.norm / "rest.parquet")
-        log.info("rest subset: %d records (%d S1)", rest.height,
-                 rest.filter(pl.col("source") == 1).height)
+    if subset in ("rest", "val2"):
+        build_holdouts(paths)
         return
     aliases = load_aliases(paths, all_train=(subset == "test"))
     df = pl.concat([pl.read_parquet(f) for f in SUBSETS[subset](paths)], how="diagonal")

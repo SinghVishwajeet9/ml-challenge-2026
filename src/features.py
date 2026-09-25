@@ -15,6 +15,8 @@ Output: work/features/<subset>.parquet (with `label` when ground truth is availa
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import polars as pl
 from rapidfuzz import fuzz, process
@@ -23,6 +25,8 @@ from rapidfuzz.distance import JaroWinkler
 from common import Paths, log, timed
 
 CHUNK = 1_000_000
+# RapidFuzz worker threads (BER_WORKERS caps it for unattended runs; -1 = all cores).
+WORKERS = int(os.environ.get("BER_WORKERS", "-1"))
 SEED = 11
 
 NORM_COLS = ["rid", "entity_id", "source", "name_norm", "name_core", "name_concat",
@@ -57,7 +61,7 @@ def _overlap_flags(a: str, b: str, prefix: str) -> list[pl.Expr]:
 def _fuzzy(df: pl.DataFrame, a: str, b: str, scorer, name: str) -> pl.Series:
     x = df[a].fill_null("").to_list()
     y = df[b].fill_null("").to_list()
-    return pl.Series(name, process.cpdist(x, y, scorer=scorer, workers=-1)
+    return pl.Series(name, process.cpdist(x, y, scorer=scorer, workers=WORKERS)
                      .astype(np.float32) / 100.0)
 
 
@@ -244,7 +248,7 @@ def pair_features(c: pl.DataFrame, ctx: PairContext) -> pl.DataFrame:
         _fuzzy(d, "name_skel_1", "name_skel_2", fuzz.token_set_ratio, "skel_tset"),
         pl.Series("concat_jw", process.cpdist(
             d["name_concat_1"].fill_null("").to_list(), d["name_concat_2"].fill_null("").to_list(),
-            scorer=JaroWinkler.normalized_similarity, workers=-1).astype(np.float32)),
+            scorer=JaroWinkler.normalized_similarity, workers=WORKERS).astype(np.float32)),
         _fuzzy(d, "name_concat_1", "name_concat_2", fuzz.partial_ratio, "concat_partial"),
         _fuzzy(d, "addr_norm_1", "addr_norm_2", fuzz.token_set_ratio, "addr_tset"),
         _fuzzy(d, "addr_norm_1", "addr_norm_2", fuzz.ratio, "addr_ratio"),
@@ -331,7 +335,8 @@ def build_features(cands: pl.DataFrame, norm: pl.DataFrame, tmp_dir):
 
 # --------------------------------------------------------------------------- stage
 
-GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_pairs"}
+GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_pairs",
+                 "val2": "val2_gt_pairs"}
 
 
 def run(paths: Paths, subset: str, neg_frac: float | None) -> None:

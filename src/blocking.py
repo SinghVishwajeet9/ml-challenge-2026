@@ -404,7 +404,8 @@ def report(cands: pl.DataFrame, norm: pl.DataFrame, gt_pairs: pl.DataFrame) -> N
              100 * rc["pair_recall"], rc["oracle_f05"], rc["cands_per_s1"])
 
 
-GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_pairs"}
+GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_pairs",
+                 "val2": "val2_gt_pairs"}
 
 
 def read_candidates(paths: Paths, subset: str) -> pl.DataFrame:

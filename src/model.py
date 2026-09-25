@@ -16,6 +16,7 @@ Decision
 from __future__ import annotations
 
 import json
+import os
 
 import lightgbm as lgb
 import numpy as np
@@ -29,9 +30,11 @@ BETA2 = 0.25
 PARAMS = {
     "objective": "binary", "learning_rate": 0.05, "num_leaves": 127,
     "min_data_in_leaf": 100, "feature_fraction": 0.8, "bagging_fraction": 0.8,
-    "bagging_freq": 1, "lambda_l2": 1.0, "verbose": -1, "num_threads": 0,
+    "bagging_freq": 1, "lambda_l2": 1.0, "verbose": -1,
+    "num_threads": int(os.environ.get("BER_THREADS", "0")),
 }
 NUM_ROUNDS = 1500
+WIDE_MIN = 0.001     # predict keeps features of pairs at or above this for the stacker
 EARLY_STOP = 50
 SEED = 7
 
@@ -171,6 +174,15 @@ def predict(paths: Paths, subset: str) -> None:
     booster = lgb.Booster(model_file=str(models / "lgb.txt"))
     norm = pl.read_parquet(paths.norm / f"{subset}.parquet")
     import xenc
+    # For the stacker: test and val2 also keep features of every pair with p >= WIDE_MIN,
+    # written in parts to disk to protect memory.
+    wide_dir = paths.work / "pred" / f"{subset}_wide"
+    save_wide = subset in ("test", "val2")
+    if save_wide:
+        import shutil
+        shutil.rmtree(wide_dir, ignore_errors=True)
+        wide_dir.mkdir(parents=True)
+    n_wide = 0
     scored, band = [], []
     for part in sorted((paths.work / "block" / subset).glob("*.parquet")):
         with timed(f"score {subset}/{part.stem}"):
@@ -184,6 +196,12 @@ def predict(paths: Paths, subset: str) -> None:
                 band.append(feats.filter(pl.Series(keep))
                             .select("s1_rid", "other_rid", *policy["features"])
                             .with_columns(pl.Series("p", p[keep])))
+                if save_wide:
+                    w = p >= WIDE_MIN
+                    (feats.filter(pl.Series(w)).select("s1_rid", "other_rid", *policy["features"])
+                     .with_columns(pl.Series("p", p[w]))
+                     .write_parquet(wide_dir / f"part_{n_wide:05d}.parquet"))
+                    n_wide += 1
     scored = pl.concat(scored)
     out = paths.work / "pred"
     out.mkdir(exist_ok=True)

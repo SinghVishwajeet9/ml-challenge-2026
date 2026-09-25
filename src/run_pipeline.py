@@ -12,6 +12,7 @@ Stages (each reads the previous stage's Parquet output, so they can be rerun alo
   submit   test TSVs -> <--out-dir>/matching_results.tsv, candidate_pairs.tsv (+ validator)
   xenc-oof / xenc-train / xenc-blend / xenc-score / xenc-apply
            hybrid cross-encoder for uncertain pairs (see xenc.py)
+  holdout-report / val2-check / stack / stack-apply   stacker and held-out checks (stack.py)
 """
 from __future__ import annotations
 
@@ -22,7 +23,8 @@ from common import Paths, setup_logging
 
 REPO = Path(__file__).resolve().parents[1]
 STAGES = ["convert", "slices", "sample", "normalize", "block", "features", "train", "predict",
-          "submit", "xenc-oof", "xenc-train", "xenc-blend", "xenc-score", "xenc-apply"]
+          "submit", "xenc-oof", "xenc-train", "xenc-blend", "xenc-score", "xenc-apply",
+          "holdout-report", "val2-check", "stack", "stack-apply"]
 
 
 def main() -> None:
@@ -33,7 +35,7 @@ def main() -> None:
     ap.add_argument("--work-dir", default=str(REPO / "work"),
                     help="where intermediate Parquet files go")
     ap.add_argument("--subset", default="sample",
-                    choices=["sample", "dev", "tune", "val", "train", "test", "rest"],
+                    choices=["sample", "dev", "tune", "val", "train", "test", "rest", "val2"],
                     help="which records the normalize / block / features stages process")
     ap.add_argument("--neg-frac", type=float, default=None,
                     help="features: keep this fraction of non-matching pairs (training only)")
@@ -45,6 +47,7 @@ def main() -> None:
     ap.add_argument("--xenc-lora", action="store_true")
     ap.add_argument("--xenc-train-frac", type=float, default=1.0)
     ap.add_argument("--xenc-use-rest", action="store_true")
+    ap.add_argument("--xenc-addr-placeholder", action="store_true")
     ap.add_argument("--validator", default=str(REPO.parent / "student_resource" / "utils"
                                                / "validate_submission.py"))
     args = ap.parse_args()
@@ -86,7 +89,8 @@ def main() -> None:
             import xenc
             xenc.train(paths, args.xenc_tag, xenc.XConfig(
                 model=args.xenc_model, epochs=args.xenc_epochs, lora=args.xenc_lora,
-                train_frac=args.xenc_train_frac, use_rest=args.xenc_use_rest))
+                train_frac=args.xenc_train_frac, use_rest=args.xenc_use_rest,
+                addr_placeholder=args.xenc_addr_placeholder))
         elif stage == "xenc-blend":
             import xenc
             xenc.blend(paths, args.xenc_tag)
@@ -96,6 +100,18 @@ def main() -> None:
         elif stage == "xenc-apply":
             import xenc
             xenc.apply(paths, args.subset, args.xenc_tag)
+        elif stage == "holdout-report":
+            import stack
+            stack.holdout_report(paths)
+        elif stage == "val2-check":
+            import stack
+            stack.val2_check(paths, ["e5s_2ep", args.xenc_tag])
+        elif stage == "stack":
+            import stack
+            stack.fit(paths, args.xenc_tag)
+        elif stage == "stack-apply":
+            import stack
+            stack.apply_test(paths, args.xenc_tag)
 
 
 if __name__ == "__main__":
