@@ -10,6 +10,8 @@ Stages (each reads the previous stage's Parquet output, so they can be rerun alo
   train    LightGBM on features/<--train-subset>, decision policy chosen on val -> work/models/
   predict  score + decide for --subset -> work/pred/<subset>_matches.parquet
   submit   test TSVs -> <--out-dir>/matching_results.tsv, candidate_pairs.tsv (+ validator)
+  xenc-oof / xenc-train / xenc-blend / xenc-score / xenc-apply
+           hybrid cross-encoder for uncertain pairs (see xenc.py)
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from common import Paths, setup_logging
 
 REPO = Path(__file__).resolve().parents[1]
 STAGES = ["convert", "slices", "sample", "normalize", "block", "features", "train", "predict",
-          "submit"]
+          "submit", "xenc-oof", "xenc-train", "xenc-blend", "xenc-score", "xenc-apply"]
 
 
 def main() -> None:
@@ -37,6 +39,11 @@ def main() -> None:
                     help="features: keep this fraction of non-matching pairs (training only)")
     ap.add_argument("--train-subset", default="tune", help="train: features to fit on")
     ap.add_argument("--out-dir", default=str(REPO / "output"), help="submit: output folder")
+    ap.add_argument("--xenc-tag", default="e5s_2ep", help="xenc: variant folder name")
+    ap.add_argument("--xenc-model", default="intfloat/multilingual-e5-small")
+    ap.add_argument("--xenc-epochs", type=int, default=2)
+    ap.add_argument("--xenc-lora", action="store_true")
+    ap.add_argument("--xenc-train-frac", type=float, default=1.0)
     ap.add_argument("--validator", default=str(REPO.parent / "student_resource" / "utils"
                                                / "validate_submission.py"))
     args = ap.parse_args()
@@ -71,6 +78,23 @@ def main() -> None:
         elif stage == "submit":
             import submit
             submit.run(paths, Path(args.out_dir), Path(args.validator))
+        elif stage == "xenc-oof":
+            import xenc
+            xenc.oof_predictions(paths, args.train_subset, args.neg_frac or 0.15)
+        elif stage == "xenc-train":
+            import xenc
+            xenc.train(paths, args.xenc_tag, xenc.XConfig(
+                model=args.xenc_model, epochs=args.xenc_epochs, lora=args.xenc_lora,
+                train_frac=args.xenc_train_frac))
+        elif stage == "xenc-blend":
+            import xenc
+            xenc.blend(paths, args.xenc_tag)
+        elif stage == "xenc-score":
+            import xenc
+            xenc.score(paths, args.subset, args.xenc_tag)
+        elif stage == "xenc-apply":
+            import xenc
+            xenc.apply(paths, args.subset, args.xenc_tag)
 
 
 if __name__ == "__main__":

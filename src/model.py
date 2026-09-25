@@ -170,17 +170,24 @@ def predict(paths: Paths, subset: str) -> None:
     policy = json.loads((models / "policy.json").read_text())
     booster = lgb.Booster(model_file=str(models / "lgb.txt"))
     norm = pl.read_parquet(paths.norm / f"{subset}.parquet")
-    scored = []
+    import xenc
+    scored, band = [], []
     for part in sorted((paths.work / "block" / subset).glob("*.parquet")):
         with timed(f"score {subset}/{part.stem}"):
             for feats in F.build_features(pl.read_parquet(part),
                                           norm.filter(pl.col("country") == part.stem),
                                           paths.work / "tmp_features"):
-                scored.append(feats.select("s1_rid", "other_rid").with_columns(pl.Series(
-                    "p", booster.predict(_matrix(feats, policy["features"])).astype(np.float32))))
+                p = booster.predict(_matrix(feats, policy["features"])).astype(np.float32)
+                scored.append(feats.select("s1_rid", "other_rid").with_columns(pl.Series("p", p)))
+                # Uncertain pairs keep their features for the cross-encoder.
+                keep = (p >= xenc.BAND[0]) & (p <= xenc.BAND[1])
+                band.append(feats.filter(pl.Series(keep))
+                            .select("s1_rid", "other_rid", *policy["features"])
+                            .with_columns(pl.Series("p", p[keep])))
     scored = pl.concat(scored)
     out = paths.work / "pred"
     out.mkdir(exist_ok=True)
+    pl.concat(band).write_parquet(out / f"{subset}_band_feats.parquet")
     scored.write_parquet(out / f"{subset}_scored.parquet")
     matches = decide(scored, policy)
     matches.write_parquet(out / f"{subset}_matches.parquet")
