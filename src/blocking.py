@@ -40,6 +40,10 @@ K_NOSTATE = 10
 # split in 2014; DC -> WA, "Washington") also search that state. Learned from training.
 MERGE_MIN_SHARE = 0.02
 MERGE_MIN_PAIRS = 200
+# If more than this share of a country's S2/S3 records have no detected state (e.g.
+# France: city-only addresses and no training data to learn city -> region), the
+# country is searched as a single region instead of per state.
+MAX_NOSTATE_SHARE = 0.10
 TFIDF_MIN_SIM = 0.2
 # Final candidates per S1 after re-ranking.
 N_KEEP = 40
@@ -307,6 +311,11 @@ def block(norm: pl.DataFrame, neighbours: pl.DataFrame | None = None) -> pl.Data
         other = norm.filter((pl.col("source") != 1) & (pl.col("country") == country))
         if s1.height == 0 or other.height == 0:
             continue
+        if other["addr_state"].is_null().mean() > MAX_NOSTATE_SHARE:
+            log.info("%s: %.0f%% of S2/S3 without state -> single region", country,
+                     100 * other["addr_state"].is_null().mean())
+            s1 = s1.with_columns(pl.lit("ALL").alias("addr_state"))
+            other = other.with_columns(pl.lit("ALL").alias("addr_state"))
         with timed(f"{country}: TF-IDF spaces ({other.height} S2/S3)"):
             space = CountrySpace(other)
         o_state = other["addr_state"].fill_null("").to_numpy()
