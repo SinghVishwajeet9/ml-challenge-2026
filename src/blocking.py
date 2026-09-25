@@ -36,6 +36,10 @@ K_TFIDF = 30
 # small quota: those records rank on name alone and would otherwise crowd out
 # address-only matches.
 K_NOSTATE = 10
+# Country-wide exact-name key: only rare names (shared by at most this many S2/S3
+# records), flagged separately and given no re-rank bonus, so it adds cross-state
+# candidates without crowding out address matches.
+COUNTRY_CONCAT_MAX = 5
 # S1 states whose true matches often sit in another state (Telangana -> Andhra Pradesh,
 # split in 2014; DC -> WA, "Washington") also search that state. Learned from training.
 MERGE_MIN_SHARE = 0.02
@@ -146,17 +150,17 @@ def _row_cos(a: sparse.csr_matrix, ia: np.ndarray, b: sparse.csr_matrix,
 
 # --------------------------------------------------------------------------- blocking
 
-SRC = ["src_name", "src_addr", "src_concat", "src_tfidf"]
+SRC = ["src_name", "src_addr", "src_concat", "src_tfidf", "src_xconcat"]
 POOL_SCHEMA = {"s1_rid": pl.Int32, "other_rid": pl.Int32, **{c: pl.Boolean for c in SRC},
                "name_score": pl.Float64, "addr_score": pl.Float64}
 
 
-def _concat_index(other: pl.DataFrame) -> pl.DataFrame:
+def _concat_index(other: pl.DataFrame, max_shared: int = 50) -> pl.DataFrame:
     keys = pl.concat([
         other.select("rid", pl.col("name_concat").alias("key")),
         other.select("rid", pl.col("name_domain").alias("key")),
     ]).filter(pl.col("key").is_not_null() & (pl.col("key").str.len_chars() >= 6)).unique()
-    common = keys.group_by("key").len().filter(pl.col("len") > 50)
+    common = keys.group_by("key").len().filter(pl.col("len") > max_shared)
     return keys.join(common.select("key"), on="key", how="anti")
 
 
@@ -256,13 +260,26 @@ def _rerank(s1: pl.DataFrame, pool: pl.DataFrame, space: CountrySpace,
             .filter(pl.col("block_rank") < N_KEEP))
 
 
+def _country_concat(s1: pl.DataFrame, concat_ix: pl.DataFrame) -> pl.DataFrame:
+    """Exact joined-name / website key across the whole country: identical names are
+    candidates even when the two records sit in different states."""
+    pairs = (s1.select("rid", pl.col("name_concat").alias("key"))
+             .join(concat_ix, on="key", suffix="_o")
+             .select(pl.col("rid").alias("s1_rid"), pl.col("rid_o").alias("other_rid"))
+             .unique())
+    return _as_pool(pairs, "src_xconcat")
+
+
 def _run_group(s1: pl.DataFrame, retrievers: list[Retriever], space: CountrySpace,
-               out: list[pl.DataFrame]) -> None:
+               out: list[pl.DataFrame], country_concat: pl.DataFrame | None = None) -> None:
     for i in range(0, s1.height, S1_CHUNK):
         chunk = s1.slice(i, S1_CHUNK)
         va_name = space.name_vec.transform(chunk["name_skel"].fill_null("").to_list())
         va_addr = space.addr_vec.transform(_addr_text(chunk).to_list())
-        pool = _merge_pools([r.query(chunk, va_name, va_addr) for r in retrievers])
+        parts = [r.query(chunk, va_name, va_addr) for r in retrievers]
+        if country_concat is not None:
+            parts.append(_country_concat(chunk, country_concat))
+        pool = _merge_pools(parts)
         out.append(_rerank(chunk, pool, space, va_name, va_addr))
 
 
@@ -292,6 +309,9 @@ def fit_state_neighbours(paths: Paths, all_train: bool = False) -> pl.DataFrame:
           .filter((pl.col("state") != pl.col("neighbour")) & (pl.col("len") >= MERGE_MIN_PAIRS)
                   & (pl.col("share") >= MERGE_MIN_SHARE))
           .select("country", "state", "neighbour"))
+    # Symmetric: if WA records often sit in DC, DC records also search WA.
+    nb = pl.concat([nb, nb.select("country", pl.col("neighbour").alias("state"),
+                                  pl.col("state").alias("neighbour"))]).unique()
     nb.write_parquet(f)
     log.info("state neighbours: %s", nb.rows())
     return nb
@@ -318,6 +338,7 @@ def block(norm: pl.DataFrame, neighbours: pl.DataFrame | None = None) -> pl.Data
             other = other.with_columns(pl.lit("ALL").alias("addr_state"))
         with timed(f"{country}: TF-IDF spaces ({other.height} S2/S3)"):
             space = CountrySpace(other)
+        country_concat = _concat_index(other, max_shared=COUNTRY_CONCAT_MAX)
         o_state = other["addr_state"].fill_null("").to_numpy()
         nostate_rows = np.flatnonzero(o_state == "")
         r_nostate = Retriever(space, nostate_rows, other[nostate_rows], with_index=True,
@@ -331,10 +352,10 @@ def block(norm: pl.DataFrame, neighbours: pl.DataFrame | None = None) -> pl.Data
                 rows = np.flatnonzero(np.isin(o_state, [st, *nbrs.get((country, st), [])]))
                 r_state = Retriever(space, rows, other[rows], with_index=True)
                 _run_group(s1.filter(pl.col("addr_state") == st), [r_state, r_nostate],
-                           space, out)
+                           space, out, country_concat)
             if s1_nostate.height:
                 r_country = Retriever(space, np.arange(other.height), None, with_index=False)
-                _run_group(s1_nostate, [r_country, r_nostate], space, out)
+                _run_group(s1_nostate, [r_country, r_nostate], space, out, country_concat)
     return pl.concat([o for o in out if o.height])
 
 

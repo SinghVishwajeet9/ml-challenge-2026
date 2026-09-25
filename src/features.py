@@ -101,10 +101,86 @@ def _oov(norm: pl.DataFrame) -> pl.DataFrame:
         (1 - pl.col("k").fill_null(False).cast(pl.Float32).mean()).alias("o_name_oov"))
 
 
-def pair_features(c: pl.DataFrame, side: pl.DataFrame) -> pl.DataFrame:
-    a = side.rename(lambda x: "s1_rid" if x == "rid" else f"{x}_1")
-    b = side.rename(lambda x: "other_rid" if x == "rid" else f"{x}_2")
+def _uniqueness(norm: pl.DataFrame) -> pl.DataFrame:
+    """How many S1 and S2/S3 records of the same country share a record's core name."""
+    cnt = norm.group_by("country", "source", "name_core").len("c")
+    n_s1 = cnt.filter(pl.col("source") == 1).select("country", "name_core",
+                                                    pl.col("c").alias("name_n_s1"))
+    n_o = (cnt.filter(pl.col("source") != 1).group_by("country", "name_core")
+           .agg(pl.col("c").sum().alias("name_n_o")))
+    return (norm.select("rid", "country", "name_core")
+            .join(n_s1, on=["country", "name_core"], how="left")
+            .join(n_o, on=["country", "name_core"], how="left")
+            .select("rid", pl.col("name_n_s1").fill_null(0).cast(pl.Int32),
+                    pl.col("name_n_o").fill_null(0).cast(pl.Int32)))
+
+
+def _idf_tables(norm: pl.DataFrame, col: str) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Token weights log(N / df) from the S2/S3 records of each country, and each
+    record's total weight."""
+    tok = (norm.select("rid", "country", "source", _split(col).alias("t")).explode("t")
+           .drop_nulls().unique(["rid", "t"]))
+    df = tok.filter(pl.col("source") != 1).group_by("country", "t").len("df")
+    n = norm.filter(pl.col("source") != 1).group_by("country").len("n")
+    w = (df.join(n, on="country")
+         .select("country", "t", (pl.col("n") / pl.col("df")).log().cast(pl.Float32).alias("w")))
+    tw = (tok.join(w, on=["country", "t"], how="left")
+          .with_columns(pl.col("w").fill_null(pl.col("w").max())).select("rid", "t", "w"))
+    return tw, tw.group_by("rid").agg(pl.col("w").sum().alias("W"))
+
+
+class PairContext:
+    """Per-record tables that pair features need, built once per country."""
+
+    def __init__(self, norm: pl.DataFrame):
+        self.side = (norm.select(NORM_COLS).join(_oov(norm), on="rid", how="left")
+                     .join(_uniqueness(norm), on="rid", how="left"))
+        self.name_w, self.name_tot = _idf_tables(norm, "name_core")
+        self.addr_w, self.addr_tot = _idf_tables(norm, "addr_core")
+        self.nums = norm.select("rid", pl.col("addr_numbers").list.eval(
+            pl.element().cast(pl.Int64, strict=False)).alias("n"))
+
+
+def _idf_pair(c: pl.DataFrame, tw: pl.DataFrame, tot: pl.DataFrame, prefix: str) -> pl.DataFrame:
+    """Rarity-weighted token overlap: shared rare words count far more than common ones."""
+    pairs = c.select("s1_rid", "other_rid")
+    shared = (pairs.join(tw.rename({"rid": "s1_rid"}), on="s1_rid")
+              .join(tw.select(pl.col("rid").alias("other_rid"), "t"), on=["other_rid", "t"])
+              .group_by("s1_rid", "other_rid").agg(pl.col("w").sum().alias("ws")))
+    d = (pairs.join(shared, on=["s1_rid", "other_rid"], how="left")
+         .join(tot.rename({"rid": "s1_rid", "W": "w1"}), on="s1_rid", how="left")
+         .join(tot.rename({"rid": "other_rid", "W": "w2"}), on="other_rid", how="left")
+         .with_columns(pl.col("ws").fill_null(0)))
+    return d.select(
+        "s1_rid", "other_rid",
+        (pl.col("ws") / (pl.col("w1") + pl.col("w2") - pl.col("ws"))).cast(pl.Float32)
+        .alias(f"{prefix}_idf_jacc"),
+        (pl.col("ws") / pl.col("w1")).cast(pl.Float32).alias(f"{prefix}_idf_cov1"),
+        (pl.col("ws") / pl.col("w2")).cast(pl.Float32).alias(f"{prefix}_idf_cov2"),
+        pl.col("ws").cast(pl.Float32).alias(f"{prefix}_idf_shared"))
+
+
+def _num_pair(c: pl.DataFrame, nums: pl.DataFrame) -> pl.DataFrame:
+    """Smallest difference between any two address numbers (384 vs 383 -> 1)."""
+    return (c.select("s1_rid", "other_rid")
+            .join(nums.rename({"rid": "s1_rid", "n": "n1"}), on="s1_rid")
+            .join(nums.rename({"rid": "other_rid", "n": "n2"}), on="other_rid")
+            .explode("n1").explode("n2").drop_nulls(["n1", "n2"])
+            .group_by("s1_rid", "other_rid")
+            .agg((pl.col("n1") - pl.col("n2")).abs().min().alias("num_min_absdiff")))
+
+
+def pair_features(c: pl.DataFrame, ctx: PairContext) -> pl.DataFrame:
+    a = ctx.side.rename(lambda x: "s1_rid" if x == "rid" else f"{x}_1")
+    b = ctx.side.rename(lambda x: "other_rid" if x == "rid" else f"{x}_2")
     d = c.join(a, on="s1_rid").join(b, on="other_rid")
+    keys = ["s1_rid", "other_rid"]
+    d = (d.join(_idf_pair(c, ctx.name_w, ctx.name_tot, "name"), on=keys, how="left")
+         .join(_idf_pair(c, ctx.addr_w, ctx.addr_tot, "addr"), on=keys, how="left")
+         .join(_num_pair(c, ctx.nums), on=keys, how="left")
+         .with_columns((pl.col("num_min_absdiff") <= 2).alias("num_near"))
+         .rename({"name_n_s1_1": "s1_name_n_s1", "name_n_o_1": "s1_name_n_o",
+                  "name_n_s1_2": "o_name_n_s1", "name_n_o_2": "o_name_n_o"}))
 
     d = d.with_columns(
         _split("name_core_1").alias("_nc1"), _split("name_core_2").alias("_nc2"),
@@ -165,6 +241,71 @@ def pair_features(c: pl.DataFrame, side: pl.DataFrame) -> pl.DataFrame:
     return d.select(keep)
 
 
+# --------------------------------------------------------------------------- competition
+
+COMPETE = ["name_tset", "name_idf_jacc", "addr_tset", "addr_idf_jacc", "name_skel_jacc"]
+
+
+def competition_features(light: pl.DataFrame) -> pl.DataFrame:
+    """For each similarity, how this S1 compares with the other S1s competing for the same
+    S2/S3 record (and with the S1's other candidates). Needs the full candidate set."""
+    exprs = []
+    for col in COMPETE:
+        x = pl.col(col)
+        second = x.filter(x < x.max()).max()
+        exprs += [
+            (x.max().over("other_rid") - x).cast(pl.Float32).alias(f"o_gap_{col}"),
+            (x - second.over("other_rid")).cast(pl.Float32).alias(f"o_margin2_{col}"),
+            x.rank("max", descending=True).over("other_rid").cast(pl.Int16)
+            .alias(f"o_rank_{col}"),
+            (x >= x.max().over("s1_rid") - 0.02).sum().over("s1_rid").cast(pl.Int16)
+            .alias(f"s1_near_top_{col}"),
+            x.rank("max", descending=True).over("s1_rid").cast(pl.Int16)
+            .alias(f"s1_rank_{col}"),
+        ]
+    exprs += [
+        (pl.col("name_idf_jacc") >= 0.99).sum().over("other_rid").cast(pl.Int16)
+        .alias("o_n_s1_name_exact"),
+        (pl.col("addr_idf_jacc") >= 0.9).sum().over("other_rid").cast(pl.Int16)
+        .alias("o_n_s1_addr_exact"),
+        (pl.col("name_idf_jacc") >= 0.99).sum().over("s1_rid").cast(pl.Int16)
+        .alias("s1_n_o_name_exact"),
+    ]
+    return light.select(exprs)
+
+
+def build_features(cands: pl.DataFrame, norm: pl.DataFrame, tmp_dir):
+    """Yield feature chunks for every candidate pair, in order.
+    Pass 1 computes pair features chunk by chunk (spilled to tmp_dir) and keeps the few
+    columns competition features need; pass 2 attaches competition features."""
+    import shutil
+    import uuid
+    ctx = PairContext(norm)
+    cands = group_features(cands)
+    # Windows keeps a file locked while its data is in use, so temp files are not
+    # deleted one by one: each call gets its own folder, and stale folders are removed.
+    for old in tmp_dir.glob("*"):
+        shutil.rmtree(old, ignore_errors=True)
+    tmp_dir = tmp_dir / uuid.uuid4().hex
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    light, files = [], []
+    for i in range(0, cands.height, CHUNK):
+        f = pair_features(cands.slice(i, CHUNK), ctx)
+        path = tmp_dir / f"part_{i // CHUNK:05d}.parquet"
+        f.write_parquet(path)
+        files.append((path, f.height))
+        light.append(f.select("s1_rid", "other_rid", *COMPETE))
+    comp = competition_features(pl.concat(light))
+    del light
+    offset = 0
+    for path, n in files:
+        # memory_map=False: on Windows a mapped file cannot be deleted afterwards.
+        chunk = pl.read_parquet(path, memory_map=False)
+        yield pl.concat([chunk, comp.slice(offset, n)], how="horizontal")
+        offset += n
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------- stage
 
 GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_pairs"}
@@ -172,34 +313,32 @@ GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_
 
 def run(paths: Paths, subset: str, neg_frac: float | None) -> None:
     norm = pl.read_parquet(paths.norm / f"{subset}.parquet")
-    cands = pl.read_parquet(paths.work / "block" / subset / "*.parquet")
-    with timed("group features"):
-        cands = group_features(cands)
-
     gt_name = GT_FOR_SUBSET.get(subset)
+    gt = None
     if gt_name or subset == "train":
         gt = pl.read_parquet(paths.slices / f"{gt_name}.parquet" if gt_name else paths.gt_pairs())
         ids = norm.select("rid", "entity_id")
         gt = (gt.join(ids.rename({"rid": "s1_rid", "entity_id": "s1_id"}), on="s1_id")
               .join(ids.rename({"rid": "other_rid", "entity_id": "match_id"}), on="match_id")
               .select("s1_rid", "other_rid", pl.lit(True).alias("label")))
-        cands = cands.join(gt, on=["s1_rid", "other_rid"], how="left").with_columns(
-            pl.col("label").fill_null(False))
-        log.info("candidates %d | positives %d (%.1f%%)", cands.height, cands["label"].sum(),
-                 100 * cands["label"].mean())
-        if neg_frac is not None and neg_frac < 1:
-            neg = cands.filter(~pl.col("label")).sample(fraction=neg_frac, seed=SEED)
-            cands = pl.concat([cands.filter(pl.col("label")), neg])
-            log.info("subsampled negatives to %.0f%% -> %d rows", 100 * neg_frac, cands.height)
-
-    side = norm.select(NORM_COLS).join(_oov(norm), on="rid", how="left")
     out_dir = paths.work / "features"
     out_dir.mkdir(exist_ok=True)
+    rng = np.random.default_rng(SEED)
     parts = []
-    with timed(f"pair features ({cands.height} rows)"):
-        for i in range(0, cands.height, CHUNK):
-            parts.append(pair_features(cands.slice(i, CHUNK), side))
-            log.info("  %d / %d", min(i + CHUNK, cands.height), cands.height)
+    for part in sorted((paths.work / "block" / subset).glob("*.parquet")):
+        cands = pl.read_parquet(part)
+        if gt is not None:
+            cands = cands.join(gt, on=["s1_rid", "other_rid"], how="left").with_columns(
+                pl.col("label").fill_null(False))
+        country_norm = norm.filter(pl.col("country") == part.stem)
+        with timed(f"features {subset}/{part.stem} ({cands.height} candidates)"):
+            for f in build_features(cands, country_norm, paths.work / "tmp_features"):
+                if gt is not None and neg_frac is not None and neg_frac < 1:
+                    keep = f["label"].to_numpy() | (rng.random(f.height) < neg_frac)
+                    f = f.filter(pl.Series(keep))
+                parts.append(f)
     feats = pl.concat(parts)
     feats.write_parquet(out_dir / f"{subset}.parquet")
+    if gt is not None:
+        log.info("positives %d of %d rows", feats["label"].sum(), feats.height)
     log.info("wrote %s: %d rows x %d cols", out_dir / f"{subset}.parquet", *feats.shape)

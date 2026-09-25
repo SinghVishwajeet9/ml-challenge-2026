@@ -370,9 +370,41 @@ def normalize(df: pl.DataFrame, aliases: pl.DataFrame) -> pl.DataFrame:
     return df.drop("name", "address")
 
 
+def fit_cooccurrence_aliases(records: pl.DataFrame, countries: list[str]) -> pl.DataFrame:
+    """Label-free component -> state learned from the records themselves: in addresses
+    that name a state explicitly, the other components (cities, districts) are counted
+    against that state. Used for countries with no training data (e.g. France, where
+    many addresses give only the city)."""
+    explicit = pl.DataFrame(explicit_state_rows(), schema=["country", "key", "state"], orient="row")
+    df = records.filter(pl.col("country").is_in(countries)).select("rid", "country", "address")
+    if df.height == 0:
+        return pl.DataFrame(schema={"country": pl.String, "key": pl.String, "state": pl.String})
+    df = df.with_columns(fold_ascii(df, "address").str.to_lowercase().alias("_a"))
+    comps = (df.select("rid", "country", pl.col("_a").str.split(",").alias("comp"))
+             .explode("comp", empty_as_null=True).filter(pl.col("comp").is_not_null())
+             .with_columns(_clean_comp(pl.col("comp")).str.replace_all("-", " ", literal=True)
+                           .alias("key"))
+             .filter(pl.col("key") != "")
+             .join(explicit, on=["country", "key"], how="left"))
+    rec_state = (comps.filter(pl.col("state").is_not_null())
+                 .group_by("rid").agg(pl.col("state").last().alias("rec_state")))
+    return (comps.filter(pl.col("state").is_null() & ~pl.col("key").str.contains(r"\d"))
+            .join(rec_state, on="rid")
+            .group_by("country", "key", "rec_state").len()
+            .with_columns(pl.col("len").sum().over("country", "key").alias("total"))
+            .filter((pl.col("total") >= 30) & (pl.col("len") / pl.col("total") >= 0.95))
+            .select("country", "key", pl.col("rec_state").alias("state")))
+
+
 def run(paths: Paths, subset: str) -> None:
     aliases = load_aliases(paths, all_train=(subset == "test"))
     df = pl.concat([pl.read_parquet(f) for f in SUBSETS[subset](paths)], how="diagonal")
+    # Countries without training aliases learn city -> state from their own addresses.
+    unseen = sorted(set(df["country"].unique()) - set(aliases["country"].unique()))
+    if unseen:
+        cooc = fit_cooccurrence_aliases(df, unseen)
+        log.info("label-free aliases for %s: %d", unseen, cooc.height)
+        aliases = pl.concat([aliases, cooc])
     out_file = paths.norm / f"{subset}.parquet"
     with timed(f"normalize {subset} ({df.height} rows)"):
         parts = [normalize(df.slice(i, CHUNK_ROWS), aliases)
