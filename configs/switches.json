@@ -1,0 +1,13 @@
+{
+  "native_dict": true,
+  "noaddr_quota": true,
+  "code_tokens": true,
+  "joint_index": true,
+  "second_pass": true,
+  "xenc_translated": true,
+  "bengali_switch": true,
+  "script_links": true,
+  "trap_correction": true,
+  "source_cap": true,
+  "pseudo_labels": true
+}

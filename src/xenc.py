@@ -26,7 +26,7 @@ import lightgbm as lgb
 import numpy as np
 import polars as pl
 
-from common import Paths, log, timed
+from common import Paths, log, switch, timed
 
 BAND = (0.01, 0.99)        # LightGBM probability range treated as uncertain
 SEED = 13
@@ -86,10 +86,20 @@ def oof_predictions(paths: Paths, subset: str = "tune", neg_frac: float = NEG_FR
 def _raw_records(paths: Paths, subset: str) -> pl.DataFrame:
     if subset in ("test", "rest"):
         split = "test" if subset == "test" else "train"
-        return pl.read_parquet(paths.records(split), columns=["rid", "name", "address"])
-    # val2 records live in the slices folder like dev / tune / val.
-    return pl.read_parquet(paths.slices / f"{subset}_records.parquet",
-                           columns=["rid", "name", "address"])
+        raw = pl.read_parquet(paths.records(split), columns=["rid", "name", "address"])
+    else:
+        # val2 records live in the slices folder like dev / tune / val.
+        raw = pl.read_parquet(paths.slices / f"{subset}_records.parquet",
+                              columns=["rid", "name", "address"])
+    if switch("xenc_translated"):
+        # Native-script names shown to the transformer in English words (native_dict.py).
+        import native_dict
+        from normalize import INDIC
+        uniq = raw.filter(pl.col("name").fill_null("").str.contains(INDIC))["name"].unique()
+        if uniq.len():
+            new = pl.Series([native_dict.translate(s) for s in uniq.to_list()], dtype=pl.String)
+            raw = raw.with_columns(pl.col("name").replace(uniq, new))
+    return raw
 
 
 def _text(name: pl.Expr, address: pl.Expr, placeholder: bool = False) -> pl.Expr:

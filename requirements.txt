@@ -7,7 +7,9 @@ scikit-learn==1.9.1
 sparse-dot-topn==1.2.0
 anyascii==0.3.3
 lightgbm==4.7.0
-# Cross-encoder (GPU). PyTorch CUDA build: pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Models (downloaded once from the Hugging Face hub, MIT licensed):
+#   intfloat/multilingual-e5-small (bi-encoder), intfloat/multilingual-e5-base (F1 cross-encoder)
+# Cross-encoders and bi-encoder (GPU). PyTorch CUDA build: pip install torch --index-url https://download.pytorch.org/whl/cu128
 torch==2.11.0
 transformers==5.17.0
 peft==0.21.0

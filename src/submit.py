@@ -37,12 +37,26 @@ def _write_tsv(df: pl.DataFrame, path: Path) -> None:
             f.write(f"{a}\t{b}\n")
 
 
-def run(paths: Paths, out_dir: Path, validator: Path) -> None:
+def run(paths: Paths, out_dir: Path, validator: Path, matches_file: Path | None = None,
+        cand_min_p: float | None = None) -> None:
+    """cand_min_p: candidate_pairs.tsv holds the blocked pairs that pass the first LightGBM
+    filter (p >= cand_min_p) instead of every blocked pair."""
     norm = pl.read_parquet(paths.norm / "test.parquet", columns=["rid", "entity_id", "source"])
     s1 = norm.filter(pl.col("source") == 1).select(pl.col("rid").alias("s1_rid"), "entity_id")
-    cands = pl.read_parquet(paths.work / "block" / "test" / "*.parquet",
-                            columns=["s1_rid", "other_rid"])
-    matches = pl.read_parquet(paths.work / "pred" / "test_matches.parquet")
+    if cand_min_p is None:
+        cands = pl.read_parquet(paths.work / "block" / "test" / "*.parquet",
+                                columns=["s1_rid", "other_rid"])
+    else:
+        cands = (pl.read_parquet(paths.work / "pred" / "test_scored.parquet")
+                 .filter(pl.col("p") >= cand_min_p).select("s1_rid", "other_rid"))
+    matches = pl.read_parquet(matches_file or paths.work / "pred" / "test_matches.parquet")
+    if cand_min_p is not None:
+        # Matches found by a second pass (links from an already-matched sibling record)
+        # are candidates of that pass.
+        extra = matches.join(cands, on=["s1_rid", "other_rid"], how="anti")
+        if extra.height:
+            log.info("%d second-pass matches added to the candidates", extra.height)
+            cands = pl.concat([cands, extra.select(cands.columns)])
     missing = matches.join(cands, on=["s1_rid", "other_rid"], how="anti").height
     if missing:
         raise AssertionError(f"{missing} matches are not in the candidate set")

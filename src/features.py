@@ -35,6 +35,13 @@ NORM_COLS = ["rid", "entity_id", "source", "name_norm", "name_core", "name_conca
              "addr_unit", "addr_missing"]
 
 
+def load_norm(paths: Paths, subset: str, country: str) -> pl.DataFrame:
+    """One country's normalized records, only the columns features need (bounds memory
+    on test)."""
+    return (pl.scan_parquet(paths.norm / f"{subset}.parquet")
+            .select([*NORM_COLS, "country"]).filter(pl.col("country") == country).collect())
+
+
 # --------------------------------------------------------------------------- helpers
 
 def _split(col: str) -> pl.Expr:
@@ -130,16 +137,22 @@ def _uniqueness(norm: pl.DataFrame) -> pl.DataFrame:
 
 
 def _idf_tables(norm: pl.DataFrame, col: str) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Token weights log(N / df) from the S2/S3 records of each country, and each
-    record's total weight."""
-    tok = (norm.select("rid", "country", "source", _split(col).alias("t")).explode("t")
-           .drop_nulls().unique(["rid", "t"]))
-    df = tok.filter(pl.col("source") != 1).group_by("country", "t").len("df")
-    n = norm.filter(pl.col("source") != 1).group_by("country").len("n")
-    w = (df.join(n, on="country")
-         .select("country", "t", (pl.col("n") / pl.col("df")).log().cast(pl.Float32).alias("w")))
-    tw = (tok.join(w, on=["country", "t"], how="left")
-          .with_columns(pl.col("w").fill_null(pl.col("w").max())).select("rid", "t", "w"))
+    """Token weights log(N / df) from the S2/S3 records, and each record's total weight.
+    `norm` holds one country (build_features runs per country). Tokens are kept as 64-bit
+    hashes: they are only compared for equality, and strings would not fit in memory for
+    the largest countries."""
+    # Built in record chunks: exploding every address at once needs > 8 GB on India test.
+    tok = pl.concat([
+        norm.slice(i, 500_000)
+        .select("rid", "source",
+                _split(col).list.eval(pl.element().hash(7)).list.unique().alias("t"))
+        .explode("t").drop_nulls()
+        for i in range(0, norm.height, 500_000)])
+    n = norm.filter(pl.col("source") != 1).height
+    w = (tok.filter(pl.col("source") != 1).group_by("t").len("df")
+         .select("t", (pl.lit(float(max(n, 1))) / pl.col("df")).log().cast(pl.Float32).alias("w")))
+    tw = (tok.select("rid", "t").join(w, on="t", how="left")
+          .with_columns(pl.col("w").fill_null(pl.col("w").max())))
     return tw, tw.group_by("rid").agg(pl.col("w").sum().alias("W"))
 
 
@@ -271,11 +284,13 @@ def competition_features(light: pl.DataFrame) -> pl.DataFrame:
     light = light.with_columns(
         *[pl.col(c).max().over("s1_rid").alias(f"_s1max_{c}") for c in COMPETE],
         pl.col("name_tset").max().over("other_rid").alias("_omax_name_tset"))
-    exprs = []
+    # Computed one similarity at a time (not in one select): each window needs memory
+    # proportional to the candidate set, and all at once does not fit on India test.
+    blocks = []
     for col in COMPETE:
         x = pl.col(col)
         second = x.filter(x < x.max()).max()
-        exprs += [
+        blocks.append(light.select(
             (x.max().over("other_rid") - x).cast(pl.Float32).alias(f"o_gap_{col}"),
             (x - second.over("other_rid")).cast(pl.Float32).alias(f"o_margin2_{col}"),
             x.rank("max", descending=True).over("other_rid").cast(pl.Int16)
@@ -284,8 +299,8 @@ def competition_features(light: pl.DataFrame) -> pl.DataFrame:
             .alias(f"s1_near_top_{col}"),
             x.rank("max", descending=True).over("s1_rid").cast(pl.Int16)
             .alias(f"s1_rank_{col}"),
-        ]
-    exprs += [
+        ))
+    blocks.append(light.select(
         (pl.col("name_idf_jacc") >= 0.99).sum().over("other_rid").cast(pl.Int16)
         .alias("o_n_s1_name_exact"),
         (pl.col("addr_idf_jacc") >= 0.9).sum().over("other_rid").cast(pl.Int16)
@@ -297,17 +312,53 @@ def competition_features(light: pl.DataFrame) -> pl.DataFrame:
         (pl.col("unit_eq").fill_null(False)
          & (pl.col("name_tset") >= pl.col("_omax_name_tset") - 0.05))
         .sum().over("other_rid").cast(pl.Int16).alias("o_n_s1_unit_eq_top_name"),
-    ]
-    return light.select(exprs)
+    ))
+    return pl.concat(blocks, how="horizontal")
+
+
+SPLIT_ROWS = 8_000_000
+# States whose records are often matched across the border stay in one group.
+TOGETHER = [{"andhra pradesh", "telangana"}, {"WA", "DC"}]
 
 
 def build_features(cands: pl.DataFrame, norm: pl.DataFrame, tmp_dir):
+    """Candidate sets above SPLIT_ROWS (India / US test) are processed in groups of S1
+    states, so memory stays within a 16 GB machine. S1-level features are exact; a record
+    competed for from two groups (records without a state) sees only its group's S1s."""
+    if cands.height <= SPLIT_ROWS:
+        yield from _build_features(cands, norm, tmp_dir)
+        return
+    st = (norm.filter(pl.col("source") == 1)
+          .select(pl.col("rid").alias("s1_rid"), pl.col("addr_state").fill_null("?").alias("st")))
+    size = cands.select("s1_rid").join(st, on="s1_rid").group_by("st").len().sort("len",
+                                                                                 descending=True)
+    units: list[tuple[set, int]] = []
+    for s, n in size.rows():
+        tie = next((u for u in units if any(s in t and u[0] & t for t in TOGETHER)), None)
+        if tie:
+            units[units.index(tie)] = (tie[0] | {s}, tie[1] + n)
+        else:
+            units.append(({s}, n))
+    k = -(-cands.height // SPLIT_ROWS)
+    groups = [[set(), 0] for _ in range(k)]
+    for states, n in sorted(units, key=lambda u: -u[1]):
+        g = min(groups, key=lambda x: x[1])
+        g[0] |= states
+        g[1] += n
+    log.info("features: %d candidates in %d state groups", cands.height, k)
+    for states, _ in groups:
+        ids = st.filter(pl.col("st").is_in(list(states))).select("s1_rid")
+        yield from _build_features(cands.join(ids, on="s1_rid"), norm, tmp_dir)
+
+
+def _build_features(cands: pl.DataFrame, norm: pl.DataFrame, tmp_dir):
     """Yield feature chunks for every candidate pair, in order.
     Pass 1 computes pair features chunk by chunk (spilled to tmp_dir) and keeps the few
     columns competition features need; pass 2 attaches competition features."""
     import shutil
     import uuid
     ctx = PairContext(norm)
+    norm = None          # the context holds what it needs; frees memory on big countries
     cands = group_features(cands)
     # Windows keeps a file locked while its data is in use, so temp files are not
     # deleted one by one: each call gets its own folder, and stale folders are removed.
@@ -336,14 +387,14 @@ def build_features(cands: pl.DataFrame, norm: pl.DataFrame, tmp_dir):
 # --------------------------------------------------------------------------- stage
 
 GT_FOR_SUBSET = {"dev": "dev_gt_pairs", "tune": "tune_gt_pairs", "val": "val_gt_pairs",
-                 "val2": "val2_gt_pairs"}
+                 "val2": "val2_gt_pairs", "delhi": "delhi_gt_pairs"}
 
 
 def run(paths: Paths, subset: str, neg_frac: float | None) -> None:
-    norm = pl.read_parquet(paths.norm / f"{subset}.parquet")
+    norm = pl.read_parquet(paths.norm / f"{subset}.parquet", columns=["rid", "entity_id"])
     gt_name = GT_FOR_SUBSET.get(subset)
     gt = None
-    if gt_name or subset == "train":
+    if gt_name or subset in ("train", "rest"):
         gt = pl.read_parquet(paths.slices / f"{gt_name}.parquet" if gt_name else paths.gt_pairs())
         ids = norm.select("rid", "entity_id")
         gt = (gt.join(ids.rename({"rid": "s1_rid", "entity_id": "s1_id"}), on="s1_id")
@@ -358,7 +409,7 @@ def run(paths: Paths, subset: str, neg_frac: float | None) -> None:
         if gt is not None:
             cands = cands.join(gt, on=["s1_rid", "other_rid"], how="left").with_columns(
                 pl.col("label").fill_null(False))
-        country_norm = norm.filter(pl.col("country") == part.stem)
+        country_norm = load_norm(paths, subset, part.stem)
         with timed(f"features {subset}/{part.stem} ({cands.height} candidates)"):
             for f in build_features(cands, country_norm, paths.work / "tmp_features"):
                 if gt is not None and neg_frac is not None and neg_frac < 1:

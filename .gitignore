@@ -23,3 +23,7 @@ Thumbs.db
 # Submitted files are kept on purpose
 !submissions/
 !submissions/**
+
+# Extra work folders (large, regenerable)
+work7/
+work7d/

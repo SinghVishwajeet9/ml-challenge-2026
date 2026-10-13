@@ -1,7 +1,9 @@
 """Shared paths, I/O helpers and logging."""
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +17,20 @@ SPLITS = ("train", "test")
 NULL_TOKENS = ["", "None", "none", "NULL", "<NULL>", "null", "nan", "NaN", "N/A"]
 
 log = logging.getLogger("ber")
+
+_SWITCHES: dict | None = None
+
+
+def switch(name: str) -> bool:
+    """Component switch from configs/switches.json (default on); env BER_<NAME>=0/1 overrides."""
+    global _SWITCHES
+    env = os.environ.get("BER_" + name.upper())
+    if env is not None:
+        return env == "1"
+    if _SWITCHES is None:
+        f = Path(__file__).resolve().parents[1] / "configs" / "switches.json"
+        _SWITCHES = json.loads(f.read_text()) if f.exists() else {}
+    return bool(_SWITCHES.get(name, True))
 
 
 def setup_logging(level: int = logging.INFO) -> None:

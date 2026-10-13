@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 
 import lightgbm as lgb
+import os
+
 import numpy as np
 import polars as pl
 
@@ -66,13 +68,99 @@ def _px(paths: Paths, subset: str, tag: str) -> pl.DataFrame:
 
 
 def blended(paths: Paths, subset: str, tag: str) -> pl.DataFrame:
-    """(s1_rid, other_rid, p, px, pb): LightGBM, transformer and their val-chosen blend."""
+    """(s1_rid, other_rid, p, px, pb): LightGBM, transformer and their val-chosen blend.
+    With EXTRA 'f1' also pf, the rival-aware cross-encoder score (null outside its band)."""
     w = json.loads((paths.work / "xenc" / tag / "blend.json").read_text())["w"]
-    return (_scored(paths, subset).join(_px(paths, subset, tag), on=["s1_rid", "other_rid"],
-                                        how="left")
-            .with_columns(pl.when(pl.col("px").is_not_null())
-                          .then((1 - w) * pl.col("p") + w * pl.col("px"))
-                          .otherwise(pl.col("p")).alias("pb")))
+    d = (_scored(paths, subset).join(_px(paths, subset, tag), on=["s1_rid", "other_rid"],
+                                     how="left")
+         .with_columns(pl.when(pl.col("px").is_not_null())
+                       .then((1 - w) * pl.col("p") + w * pl.col("px"))
+                       .otherwise(pl.col("p")).alias("pb")))
+    if "f1" in EXTRA:
+        pf = pl.read_parquet(paths.work / "xenc" / F1_TAG / f"{subset}_scored.parquet")
+        d = d.join(pf.select("s1_rid", "other_rid", pl.col("px").alias("pf")),
+                   on=["s1_rid", "other_rid"], how="left")
+    return d
+
+
+# --------------------------------------------------------------------------- extra inputs
+# BER_STACK_EXTRA="f1,e1": f1 = local rival-aware cross-encoder, e1 = legal-form / exact
+# spelling competition among the S1 candidates of a record (no-address twins).
+EXTRA = set(filter(None, os.environ.get("BER_STACK_EXTRA", "").split(",")))
+F1_TAG = "f1l"
+F1_COLS = ["pf", "o_rank_pf", "o_margin_pf", "o_gap_pf"]
+E1_COLS = ["legal_same", "raw_exact", "ci_exact", "tail_same", "o_n_legal_same",
+           "o_only_legal_same", "o_n_raw_exact", "o_only_raw_exact", "o_n_ci_exact",
+           "o_only_ci_exact", "o_n_tail_same", "o_only_tail_same", "o_n_core_same"]
+E1_MIN = 0.02           # a candidate S1 counts as a competitor from this blended score
+
+
+TRAP_COLS = ["s1_has_exact_house", "trap_rival", "s1_n_house_conflict_hi"]
+
+
+def extra_cols() -> list[str]:
+    return ((F1_COLS if "f1" in EXTRA else []) + (E1_COLS if "e1" in EXTRA else [])
+            + (TRAP_COLS if "trap" in EXTRA else []))
+
+
+def _names(paths: Paths, subset: str) -> pl.DataFrame:
+    norm = pl.read_parquet(paths.norm / f"{subset}.parquet",
+                           columns=["rid", "name_legal", "name_core"])
+    if subset == "test":
+        raw = pl.read_parquet(paths.records("test"), columns=["rid", "name"])
+    else:
+        raw = pl.read_parquet(paths.slices / f"{subset}_records.parquet", columns=["rid", "name"])
+    nm = pl.col("name").fill_null("")
+    return norm.join(raw, on="rid", how="left").select(
+        "rid", "name_legal", "name_core", nm.alias("raw"),
+        nm.str.to_lowercase().str.replace_all(r"[^\p{L}\p{N}]+", " ").str.strip_chars().alias("ci"),
+        nm.str.to_lowercase().str.replace_all(r"[^\p{L}\p{N}]+", " ").str.strip_chars()
+        .str.split(" ").list.last().alias("tail"))
+
+
+def extra_features(paths: Paths, subset: str, act: pl.DataFrame) -> pl.DataFrame:
+    if "trap" in EXTRA and "house_eq" in act.columns:
+        # the S1 already has a confident candidate with the same house number: rivals with a
+        # conflicting house number are likely near-copy traps
+        exact = ((pl.col("house_eq") == 1) & (pl.col("pb") >= 0.7))
+        conf = (pl.col("house_conflict") == 1)
+        act = act.with_columns(exact.any().over("s1_rid").cast(pl.Float32).alias("s1_has_exact_house"),
+                               (conf & (conf & (pl.col("pb") >= 0.3)).sum().over("s1_rid").gt(0))
+                               .cast(pl.Float32).alias("s1_n_house_conflict_hi"))
+        act = act.with_columns((pl.col("s1_has_exact_house").cast(pl.Boolean) & conf)
+                               .cast(pl.Float32).alias("trap_rival"))
+    if "f1" in EXTRA:
+        x = pl.col("pf")
+        has = x.is_not_null()
+        second = x.filter(x < x.max()).max()
+        act = act.with_columns(
+            pl.when(has).then(x.rank("ordinal", descending=True).over("other_rid"))
+            .cast(pl.Float32).alias("o_rank_pf"),
+            pl.when(has).then(x - second.over("other_rid")).alias("o_margin_pf"),
+            pl.when(has).then(x.max().over("other_rid") - x).alias("o_gap_pf"))
+    if "e1" in EXTRA:
+        nm = _names(paths, subset)
+        a = act.select("s1_rid", "other_rid", "pb").join(
+            nm.rename({c: f"{c}_1" for c in nm.columns if c != "rid"}).rename({"rid": "s1_rid"}),
+            on="s1_rid", how="left").join(
+            nm.rename({c: f"{c}_2" for c in nm.columns if c != "rid"}).rename({"rid": "other_rid"}),
+            on="other_rid", how="left")
+        eq = lambda c: ((pl.col(f"{c}_1") == pl.col(f"{c}_2")) & (pl.col(f"{c}_1") != "")).fill_null(False)
+        a = a.with_columns(eq("name_legal").alias("legal_same"), eq("raw").alias("raw_exact"),
+                           eq("ci").alias("ci_exact"), eq("tail").alias("tail_same"),
+                           eq("name_core").alias("core_same"))
+        comp = pl.col("pb") >= E1_MIN
+        cols = []
+        for f in ("legal_same", "raw_exact", "ci_exact", "tail_same"):
+            n = (pl.col(f) & comp).sum().over("other_rid").cast(pl.Float32)
+            cols += [n.alias(f"o_n_{f}"), (pl.col(f) & (n == 1)).cast(pl.Float32).alias(f"o_only_{f}")]
+        cols.append((pl.col("core_same") & comp).sum().over("other_rid").cast(pl.Float32)
+                    .alias("o_n_core_same"))
+        a = a.with_columns(cols).with_columns(
+            pl.col("legal_same", "raw_exact", "ci_exact", "tail_same").cast(pl.Float32))
+        act = act.join(a.select("s1_rid", "other_rid", *E1_COLS), on=["s1_rid", "other_rid"],
+                       how="left")
+    return act
 
 
 def competition(d: pl.DataFrame) -> pl.DataFrame:
@@ -106,7 +194,7 @@ def active_frame(paths: Paths, subset: str, tag: str, cols: list[str]) -> tuple[
     act = d.filter(pl.col("pb") >= ACTIVE_MIN)
     act = act.join(_features(paths, subset, cols).collect(), on=["s1_rid", "other_rid"],
                    how="inner")
-    return d.select("s1_rid", "other_rid", "pb"), act
+    return d.select("s1_rid", "other_rid", "pb"), extra_features(paths, subset, act)
 
 
 def _final_scores(all_pb: pl.DataFrame, act: pl.DataFrame, p2: np.ndarray) -> pl.DataFrame:
@@ -163,11 +251,15 @@ def val2_check(paths: Paths, tags: list[str]) -> dict:
 
 # --------------------------------------------------------------------------- stacker
 
+def _out(paths: Paths, tag: str):
+    return paths.work / "stack" / (tag + "".join(f"_{e}" for e in sorted(EXTRA)))
+
+
 def fit(paths: Paths, tag: str) -> None:
-    out = paths.work / "stack" / tag
+    out = _out(paths, tag)
     out.mkdir(parents=True, exist_ok=True)
     cols = json.loads((paths.work / "models" / "policy.json").read_text())["features"]
-    feats = cols + ["p", "px", "pb"] + COMP
+    feats = cols + ["p", "px", "pb"] + COMP + extra_cols()
     gt, s1 = gt_rids(paths, "val")
 
     with timed("[stack] build val frame"):
@@ -206,23 +298,34 @@ def fit(paths: Paths, tag: str) -> None:
         f_val2_blend = f05(M.decide_threshold(all2.rename({"pb": "p"}), blend["t"]), gt2, s12)
     else:
         log.info("[stack] val2 inputs not found; val2 check skipped")
-    report = {"tag": tag, "val_blend": blend["val_f05"], "val_stack_loso": f_stack,
-              "t_stack": t_oof, "t_blend": blend["t"], "w_blend": blend["w"],
-              "val2_stack": f_val2_stack, "val2_blend": f_val2_blend, "features": feats}
+    # Delhi: crowded holdout, never trained on (needs pred/delhi_wide and transformer scores)
+    f_delhi_stack = f_delhi_blend = None
+    if (paths.work / "xenc" / tag / "delhi_scored.parquet").exists():
+        gt3, s13 = gt_rids(paths, "delhi")
+        all3, act3 = active_frame(paths, "delhi", tag, cols)
+        p3 = booster.predict(M._matrix(act3, feats))
+        f_delhi_stack = f05(M.decide_threshold(_final_scores(all3, act3, p3), t_oof), gt3, s13)
+        f_delhi_blend = f05(M.decide_threshold(all3.rename({"pb": "p"}), blend["t"]), gt3, s13)
+        log.info("[stack] delhi: blend %s | stacker %s", f_delhi_blend, f_delhi_stack)
+    report = {"tag": tag, "extra": sorted(EXTRA), "val_blend": blend["val_f05"],
+              "val_stack_loso": f_stack, "t_stack": t_oof, "t_blend": blend["t"],
+              "w_blend": blend["w"], "val2_stack": f_val2_stack, "val2_blend": f_val2_blend,
+              "delhi_stack": f_delhi_stack, "delhi_blend": f_delhi_blend, "features": feats}
     (out / "report.json").write_text(json.dumps(report, indent=1))
     log.info("[stack] val2: blend %s | stacker %s", f_val2_blend, f_val2_stack)
 
 
 def apply_test(paths: Paths, tag: str) -> None:
-    rep = json.loads((paths.work / "stack" / tag / "report.json").read_text())
-    booster = lgb.Booster(model_file=str(paths.work / "stack" / tag / "stack.txt"))
+    rep = json.loads((_out(paths, tag) / "report.json").read_text())
+    booster = lgb.Booster(model_file=str(_out(paths, tag) / "stack.txt"))
     cols = json.loads((paths.work / "models" / "policy.json").read_text())["features"]
     with timed("[stack] test competition features"):
         d = competition(blended(paths, "test", tag))
         all_pb = d.select("s1_rid", "other_rid", "pb")
-        act = d.filter(pl.col("pb") >= ACTIVE_MIN).select("s1_rid", "other_rid", "p", "px", "pb",
-                                                         *COMP)
+        act = d.filter(pl.col("pb") >= ACTIVE_MIN).select(
+            "s1_rid", "other_rid", "p", "px", "pb", *COMP, *(["pf"] if "f1" in EXTRA else []))
         del d
+        act = extra_features(paths, "test", act)
     scored = []
     for part in sorted((paths.work / "pred" / "test_wide").glob("*.parquet")):
         f = pl.read_parquet(part, columns=["s1_rid", "other_rid", *cols]).join(

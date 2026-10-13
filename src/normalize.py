@@ -31,7 +31,7 @@ import re
 import polars as pl
 from anyascii import anyascii
 
-from common import Paths, log, timed
+from common import Paths, log, switch, timed
 from geo import explicit_state_rows
 
 INDIC = r"[ऀ-෿]"
@@ -84,6 +84,12 @@ HOUSE_RE = (r"(?:\b(?:plot|p|h|house|door|d|shop|kh|khasra|survey|sy|s|ward|buil
 UNIT_RE = (r"\b(?:unit|suite|ste|apt|apartment|flat|fl|floor|room|rm)\b\s*(?:no)?\s*[.:#-]*\s*"
            r"[0-9a-z/-]*|\b\d+\s*(?:st|nd|rd|th)?\s*(?:floor|fl)\b|\bground\s+floor\b")
 LANDMARK_RE = r"^(?:near|nr|opp|opposite|behind|beside|next to|adjacent to|adj)\b"
+# Municipal numbering formats kept whole as an extra address word ("c-115" -> "c115",
+# "178/1" -> "178_1", "4/a" -> "4a", "1312c/11" -> "1312c_11"); the numbers themselves
+# stay in addr_numbers unchanged.
+CODE_RE = (r"\b[a-z]{1,2}\s?[-/]\s?\d{1,5}[a-z]?\b|\b[a-z]\d{1,5}[a-z]?\b"
+           r"|\b\d{1,5}[a-z]?\s?[-/]\s?\d{1,5}[a-z]?\b|\b\d{1,5}\s?[-/]\s?[a-z]\b|\b\d{1,5}[a-z]\b")
+CODE_SKIP_PREFIX = r"^(?:no|nr|sr|rd|st|nd|th)"
 
 
 # --------------------------------------------------------------------------- helpers
@@ -154,10 +160,9 @@ def _tokens(e: pl.Expr) -> pl.Expr:
 
 def normalize_names(df: pl.DataFrame) -> pl.DataFrame:
     raw = pl.col("name")
-    df = df.with_columns(
-        raw.str.contains(INDIC).alias("name_translit"),
-        fold_ascii(df, "name").str.to_lowercase().alias("_n"),
-    )
+    if "name_translit" not in df.columns:
+        df = df.with_columns(raw.str.contains(INDIC).alias("name_translit"))
+    df = df.with_columns(fold_ascii(df, "name").str.to_lowercase().alias("_n"))
     n = pl.col("_n")
     domain_re = r"(?:www\.)?([a-z0-9][a-z0-9-]*)\.(?:com|net|org|co\.in|in|co|biz|info|us|fr)\b"
     df = df.with_columns(
@@ -219,6 +224,7 @@ def normalize_names(df: pl.DataFrame) -> pl.DataFrame:
 def _clean_comp(e: pl.Expr) -> pl.Expr:
     return (e.str.replace_all("&", " and ", literal=True)
             .str.replace_all(r"n°", " no ", literal=True)
+            .str.replace_all(r"\bn\s?deg\b", " no ")     # "N°" after ASCII folding
             .str.replace_all(r"[.'`]", " ")
             .str.replace_all(r"[^a-z0-9/# -]+", " ")
             .str.replace_all(r"\s+", " ").str.strip_chars(" -"))
@@ -294,6 +300,20 @@ def normalize_addresses(df: pl.DataFrame, aliases: pl.DataFrame) -> pl.DataFrame
         pl.col("unit").filter(pl.col("unit") != "").str.join(" ").alias("addr_unit"),
         pl.col("comp").filter(pl.col("landmark")).str.join(" ").alias("addr_landmark"),
     )
+    if switch("code_tokens"):
+        codes = (comps.filter(keep & pl.col("state").is_null())
+                 .select("rid", pl.col("body").str.extract_all(CODE_RE).alias("c"))
+                 .explode("c").filter(pl.col("c").is_not_null())
+                 .with_columns(pl.col("c").str.replace_all(r"\s", "")
+                               .str.replace_all(r"(\d)[-/](\d)", "${1}_${2}")
+                               .str.replace_all(r"[-/]", ""))
+                 .filter(~pl.col("c").str.contains(CODE_SKIP_PREFIX))
+                 .group_by("rid").agg(pl.col("c").unique().alias("_codes")))
+        tok_agg = (tok_agg.join(codes, on="rid", how="full", coalesce=True)
+                   .with_columns(pl.concat_list(pl.col("_core").fill_null([]),
+                                                pl.col("_codes").fill_null([]))
+                                 .list.unique().list.sort().alias("_core"))
+                   .drop("_codes"))
     out = df.join(agg, on="rid", how="left").join(tok_agg, on="rid", how="left")
     return out.with_columns(
         pl.coalesce("_explicit", "_learned").alias("addr_state"),
@@ -341,6 +361,7 @@ SUBSETS = {
     "dev": lambda p: [p.slices / "dev_records.parquet"],
     "tune": lambda p: [p.slices / "tune_records.parquet"],
     "val": lambda p: [p.slices / "val_records.parquet"],
+    "val2": lambda p: [p.slices / "val2_records.parquet"],
     "train": lambda p: [p.records("train")],
     "test": lambda p: [p.records("test")],
 }
@@ -364,7 +385,21 @@ def load_aliases(paths: Paths, all_train: bool = False) -> pl.DataFrame:
     return aliases
 
 
+def translate_native_names(df: pl.DataFrame) -> pl.DataFrame:
+    """Native-script words -> English words (learned dictionary, native_dict.py). The
+    name_translit flag keeps recording that the name was written in an Indian script."""
+    import native_dict
+    df = df.with_columns(pl.col("name").fill_null("").str.contains(INDIC).alias("name_translit"))
+    uniq = df.filter(pl.col("name_translit"))["name"].unique()
+    if uniq.len():
+        new = pl.Series([native_dict.translate(s) for s in uniq.to_list()], dtype=pl.String)
+        df = df.with_columns(pl.col("name").replace(uniq, new))
+    return df
+
+
 def normalize(df: pl.DataFrame, aliases: pl.DataFrame) -> pl.DataFrame:
+    if switch("native_dict"):
+        df = translate_native_names(df)
     df = normalize_names(df)
     df = normalize_addresses(df, aliases)
     return df.drop("name", "address")
@@ -438,7 +473,9 @@ def fit_cooccurrence_aliases(records: pl.DataFrame, countries: list[str]) -> pl.
 
 
 def run(paths: Paths, subset: str) -> None:
-    if subset in ("rest", "val2"):
+    # val2 is normalized from its own raw slice once build_holdouts has written it.
+    if subset == "rest" or (subset == "val2"
+                            and not (paths.slices / "val2_records.parquet").exists()):
         build_holdouts(paths)
         return
     aliases = load_aliases(paths, all_train=(subset == "test"))
