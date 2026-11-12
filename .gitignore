@@ -20,9 +20,8 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Submitted files are kept on purpose
-!submissions/
-!submissions/**
+# Old submission files are kept locally only
+submissions/
 
 # Extra work folders (large, regenerable)
 work7/
